@@ -32,10 +32,20 @@ def build_common_reset_randomization(
         low, high = domain_rand.added_mass_range
         payload.base_mass_delta = np.random.uniform(low, high, size=(num_reset,))
 
-    if getattr(domain_rand, "random_com", False):
-        low, high = domain_rand.com_offset_x
+    has_com_x = getattr(domain_rand, "random_com", False)
+    has_com_y = getattr(domain_rand, "randomize_com_y", False)
+    has_com_z = getattr(domain_rand, "randomize_com_z", False)
+    if has_com_x or has_com_y or has_com_z:
         base_com_offset = np.zeros((num_reset, 3), dtype=np.float64)
-        base_com_offset[:, 0] = np.random.uniform(low, high, size=(num_reset,))
+        if has_com_x:
+            low, high = domain_rand.com_offset_x
+            base_com_offset[:, 0] = np.random.uniform(low, high, size=(num_reset,))
+        if has_com_y:
+            low, high = domain_rand.com_offset_y
+            base_com_offset[:, 1] = np.random.uniform(low, high, size=(num_reset,))
+        if has_com_z:
+            low, high = domain_rand.com_offset_z
+            base_com_offset[:, 2] = np.random.uniform(low, high, size=(num_reset,))
         payload.base_com_offset = base_com_offset
 
     if getattr(domain_rand, "randomize_gravity", False):

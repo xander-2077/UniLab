@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -17,7 +18,9 @@ from unilab.dr import (
     DomainRandomizationProvider,
     IntervalRandomizationPlan,
     ResetPlan,
+    ResetRandomizationPayload,
 )
+from unilab.dr.types import RESET_TERM_GEOM_FRICTION
 from unilab.dr.dr_utils import (
     build_common_reset_randomization,
     build_interval_push_plan,
@@ -104,6 +107,11 @@ class Domain_Rand:
 
     random_com: bool = False
     com_offset_x: list[float] = field(default_factory=lambda: [-0.05, 0.05])
+    # mjlab WBT samples y/z too; default OFF to keep other tasks unchanged.
+    randomize_com_y: bool = False
+    com_offset_y: list[float] = field(default_factory=lambda: [-0.05, 0.05])
+    randomize_com_z: bool = False
+    com_offset_z: list[float] = field(default_factory=lambda: [-0.05, 0.05])
 
     randomize_gravity: bool = False
     gravity_range: list[list[float]] = field(
@@ -120,6 +128,15 @@ class Domain_Rand:
 
     randomize_kd: bool = False
     kd_multiplier_range: list[float] = field(default_factory=lambda: [0.9, 1.1])
+
+    # mjlab parity: per-episode encoder bias added to actor's joint_pos obs.
+    enable_encoder_bias: bool = False
+    encoder_bias_range: list[float] = field(default_factory=lambda: [-0.01, 0.01])
+
+    # mjlab parity: foot geom friction sampled at reset (absolute value).
+    randomize_geom_friction: bool = False
+    friction_range: list[float] = field(default_factory=lambda: [0.3, 1.2])
+    friction_geom_pattern: str = r"^(left|right)_foot[1-7]_collision$"
 
 
 @dataclass
@@ -187,16 +204,36 @@ class G1MotionTrackingEnvCfg(G1MotionTrackingCfg):
 
 class G1MotionTrackingDomainRandomizationProvider(DomainRandomizationProvider):
     def __init__(
-        self, *, base_kp: np.ndarray | None = None, base_kd: np.ndarray | None = None
+        self,
+        *,
+        base_kp: np.ndarray | None = None,
+        base_kd: np.ndarray | None = None,
+        base_geom_friction: np.ndarray | None = None,
+        foot_geom_ids: np.ndarray | None = None,
     ) -> None:
         self._base_kp = base_kp
         self._base_kd = base_kd
+        self._base_geom_friction = base_geom_friction
+        self._foot_geom_ids = foot_geom_ids
 
     def validate(self, env: Any, capabilities: DomainRandomizationCapabilities) -> None:
         validate_common_reset_randomization(
             env, capabilities, base_kp=self._base_kp, base_kd=self._base_kd
         )
         validate_interval_push_support(env, capabilities)
+        if getattr(env.cfg.domain_rand, "randomize_geom_friction", False):
+            if not capabilities.supports_reset_term(RESET_TERM_GEOM_FRICTION):
+                raise NotImplementedError(
+                    f"{env._backend.backend_type} backend does not support geom-friction reset randomization"
+                )
+            if (
+                self._base_geom_friction is None
+                or self._foot_geom_ids is None
+                or self._foot_geom_ids.size == 0
+            ):
+                raise ValueError(
+                    "randomize_geom_friction=True but provider has no foot geom IDs"
+                )
 
     def build_interval_randomization_plan(
         self, env: Any, step_counter: int
@@ -272,18 +309,46 @@ class G1MotionTrackingDomainRandomizationProvider(DomainRandomizationProvider):
         qvel[:, 3:6] = np_quat_apply(np_quat_inv(root_ori), root_ang_vel)
         qvel[:, 6:] = joint_vel
 
-        info_updates = {
+        info_updates: dict[str, Any] = {
             "current_actions": zero_actions(num_reset, env._num_action),
             "last_actions": zero_actions(num_reset, env._num_action),
         }
+
+        dr_cfg = env.cfg.domain_rand
+        if getattr(dr_cfg, "enable_encoder_bias", False):
+            low, high = dr_cfg.encoder_bias_range
+            info_updates["joint_pos_obs_bias"] = np.random.uniform(
+                low, high, size=(num_reset, env._num_action)
+            ).astype(get_global_dtype())
+
+        randomization = build_common_reset_randomization(
+            env, num_reset, base_kp=self._base_kp, base_kd=self._base_kd
+        )
+
+        if getattr(dr_cfg, "randomize_geom_friction", False):
+            assert self._base_geom_friction is not None
+            assert self._foot_geom_ids is not None
+            payload = randomization or ResetRandomizationPayload()
+            low, high = dr_cfg.friction_range
+            scale = np.random.uniform(low, high, size=(num_reset, 1)).astype(np.float64)
+            geom_friction = np.broadcast_to(
+                self._base_geom_friction,
+                (num_reset, *self._base_geom_friction.shape),
+            ).copy()
+            # mjlab parity: shared_random=True — same scalar across all foot geoms
+            # in one env, applied to sliding-friction column (axis 0).
+            geom_friction[:, self._foot_geom_ids, 0] = scale * np.ones(
+                (1, self._foot_geom_ids.size)
+            )
+            payload.geom_friction = geom_friction
+            randomization = payload
+
         return ResetPlan(
             env_ids=env_ids,
             qpos=qpos,
             qvel=qvel,
             info_updates=info_updates,
-            randomization=build_common_reset_randomization(
-                env, num_reset, base_kp=self._base_kp, base_kd=self._base_kd
-            ),
+            randomization=randomization,
         )
 
     def build_reset_observation(
@@ -358,13 +423,27 @@ class G1MotionTrackingEnv(G1BaseEnv):
         self.motion_sampler = MotionSampler(
             self.motion_loader, mode=cfg.sampling_mode, num_envs=num_envs
         )
+        provider_kwargs: dict[str, Any] = {}
         if cfg.domain_rand.randomize_kp or cfg.domain_rand.randomize_kd:
             base_kp, base_kd = backend.get_actuator_gains()
-            dr_provider = G1MotionTrackingDomainRandomizationProvider(
-                base_kp=base_kp, base_kd=base_kd
+            provider_kwargs["base_kp"] = base_kp
+            provider_kwargs["base_kd"] = base_kd
+        if cfg.domain_rand.randomize_geom_friction:
+            base_geom_friction = backend.get_geom_friction()
+            geom_names = backend.get_geom_names()
+            pattern = re.compile(cfg.domain_rand.friction_geom_pattern)
+            foot_geom_ids = np.asarray(
+                [i for i, name in enumerate(geom_names) if name and pattern.match(name)],
+                dtype=np.int64,
             )
-        else:
-            dr_provider = G1MotionTrackingDomainRandomizationProvider()
+            if foot_geom_ids.size == 0:
+                raise ValueError(
+                    "friction_geom_pattern "
+                    f"'{cfg.domain_rand.friction_geom_pattern}' did not match any geom"
+                )
+            provider_kwargs["base_geom_friction"] = base_geom_friction
+            provider_kwargs["foot_geom_ids"] = foot_geom_ids
+        dr_provider = G1MotionTrackingDomainRandomizationProvider(**provider_kwargs)
         self._init_domain_randomization(dr_provider)
 
         # Buffers for relative body transforms
@@ -390,12 +469,19 @@ class G1MotionTrackingEnv(G1BaseEnv):
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
-        # Actor: command(2n) + motion_anchor_pos_b(3) + motion_anchor_ori_b(6)
-        #        + linvel(3) + gyro(3) + joint_pos(n) + joint_vel(n) + actions(n)
+        # Actor: command(2n) + [motion_anchor_pos_b(3)?] + motion_anchor_ori_b(6)
+        #        + [linvel(3)?] + gyro(3) + joint_pos(n) + joint_vel(n) + actions(n)
+        # Critic always carries the full set + privileged body transforms.
         n = self._num_action
-        actor_dim = 3 + 6 + 3 + 3 + n * 5
+        noise_cfg = self._cfg.noise_config
+        actor_dim = 6 + 3 + n * 5  # ori + gyro + 2n command + 3n proprio
+        if not noise_cfg.enable_zero_anchor_pos:
+            actor_dim += 3
+        if not noise_cfg.enable_zero_linvel:
+            actor_dim += 3
+        critic_dim = 3 + 6 + 3 + 3 + n * 5  # full unmasked actor view
         critic_extra_dim = len(self._cfg.body_names) * 9
-        return {"obs": actor_dim, "critic": actor_dim + critic_extra_dim}
+        return {"obs": actor_dim, "critic": critic_dim + critic_extra_dim}
 
     def _init_reward_functions(self):
         self._reward_fns = {
@@ -600,21 +686,27 @@ class G1MotionTrackingEnv(G1BaseEnv):
         noisy_joint_pos_rel = self._obs_noise(joint_pos_rel, noise_cfg.scale_joint_angle)
         noisy_dof_vel = self._obs_noise(dof_vel, noise_cfg.scale_joint_vel)
 
-        # Actor observations (noisy proprioception)
-        actor_obs = np.concatenate(
-            [
-                command,
-                motion_anchor_pos_b,
-                motion_anchor_ori_b,
-                noisy_linvel,
-                noisy_gyro,
-                noisy_joint_pos_rel,
-                noisy_dof_vel,
-                last_actions,
-            ],
-            axis=1,
-            dtype=get_global_dtype(),
-        )
+        # Per-episode encoder bias — additive on actor's joint_pos channel.
+        bias = info.get("joint_pos_obs_bias")
+        if bias is not None and bias.shape == noisy_joint_pos_rel.shape:
+            noisy_joint_pos_rel = np.asarray(
+                noisy_joint_pos_rel + bias, dtype=noisy_joint_pos_rel.dtype
+            )
+
+        actor_anchor_ori_b = motion_anchor_ori_b
+        if noise_cfg.enable_anchor_ori_noise:
+            actor_anchor_ori_b = self._obs_noise(motion_anchor_ori_b, noise_cfg.scale_anchor_ori)
+
+        # Actor observations (noisy proprioception). Drop deploy-unavailable
+        # channels when the corresponding flag is enabled (mjlab parity).
+        actor_terms = [command]
+        if not noise_cfg.enable_zero_anchor_pos:
+            actor_terms.append(motion_anchor_pos_b)
+        actor_terms.append(actor_anchor_ori_b)
+        if not noise_cfg.enable_zero_linvel:
+            actor_terms.append(noisy_linvel)
+        actor_terms.extend([noisy_gyro, noisy_joint_pos_rel, noisy_dof_vel, last_actions])
+        actor_obs = np.concatenate(actor_terms, axis=1, dtype=get_global_dtype())
 
         # Robot body positions in robot anchor frame (critic-only privileged) — vectorized
         n_body = len(self._cfg.body_names)

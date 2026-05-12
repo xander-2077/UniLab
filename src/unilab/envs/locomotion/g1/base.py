@@ -19,6 +19,15 @@ class NoiseConfig:
     scale_gyro: float = 0.1
     scale_gravity: float = 0.05
     scale_linvel: float = 0.1
+    # --- Sim2real-oriented switches (default OFF, opt-in via task yaml) ---
+    # When True, drop ``base_lin_vel`` from actor obs (G1 has no linvel sensor).
+    enable_zero_linvel: bool = False
+    # When True, drop ``motion_anchor_pos_b`` from actor obs (no torso-pose
+    # estimator on real robot). Pairs with mjlab's "no-state-estimation" mode.
+    enable_zero_anchor_pos: bool = False
+    # When True, add per-step uniform noise to ``motion_anchor_ori_b`` (actor only).
+    enable_anchor_ori_noise: bool = False
+    scale_anchor_ori: float = 0.05
 
 
 @dataclass
