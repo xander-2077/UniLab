@@ -18,12 +18,26 @@
 #   Stalled:              length plateaus <200 or oscillates ±30 for >30 M steps,
 #                         or reward/mean drops while undesired_contacts swings.
 # -----------------------------------------------------------------------------
-# Stage 1 (ACTIVE): reward retune toward mjlab parity. ONLY change in this file.
+# Stage 1 (DONE): reward retune toward mjlab parity.
 #   - motion_global_root_pos: 1.0 -> 0.5  (avoid root-only solutions)
 #   - motion_body_pos:        2.0 -> 1.0  (avoid local-tracking dominance over balance)
 #   - joint_limit:           -2.0 -> -5.0 (stronger limit penalty; mjlab uses -10)
+#   Result: episode/length 150 -> 210; body_pos raw reward EXCEEDS yellow; SAC
+#   training dynamics healthy (alpha stable, action_std low, qf_loss declining).
+#   Remaining symptom: torso swaying L/R — reward/motion_global_root_ori raw
+#   value 0.54 (worse than green 0.8 and yellow 0.9). Diagnosis: with root:body
+#   reward ratio at 1:4 and motion_anchor_pos_b zeroed from actor obs, the policy
+#   only has motion_anchor_ori_b (6-d cols) as an OBSERVABLE root-state signal,
+#   and its reward weight (0.5) is too small to compete with the 4.0 body cluster.
 #
-# Stage 2 (DR softening — if Stage 1 stalls at ~50 M steps):
+# Stage 1.5 (ACTIVE): surgical fix for residual torso sway.
+#   - motion_global_root_ori: 0.5 -> 1.0  (match body_ori weight; rebalance
+#                                          root:body from 1:4 to 1.5:4)
+#   Why only root_ori (not root_pos): root_ori is observable via motion_anchor_ori_b
+#   in actor obs; root_pos is zeroed by enable_zero_anchor_pos so raising its
+#   weight rewards a quantity the policy cannot directly perceive.
+#
+# Stage 2 (DR softening — if Stage 1.5 still leaves torso sway at ~50 M steps):
 #   Edit `env.domain_rand` block below to:
 #     max_force:        [600,600,240] -> [300, 300, 120]
 #     push_interval:    100           -> 200          # ≈4 s
@@ -127,15 +141,15 @@ env:
     encoder_bias_range: [-0.01, 0.01]
 reward:
   scales:
-    # Stage 1 active: mjlab-parity retune (see header for rationale & fallback ladder).
-    motion_global_root_pos: 0.5       # mjlab parity (was 1.0)
-    motion_global_root_ori: 0.5       # mjlab parity (kept)
-    motion_body_pos: 1.0              # mjlab parity (was 2.0)
+    # Stage 1.5 active: bumped root_ori to fix residual torso sway after Stage 1.
+    motion_global_root_pos: 0.5       # Stage 1 (mjlab parity, was 1.0)
+    motion_global_root_ori: 1.0       # Stage 1.5 (was 0.5; restore root attitude authority)
+    motion_body_pos: 1.0              # Stage 1 (mjlab parity, was 2.0)
     motion_body_ori: 1.0              # mjlab parity (kept)
     motion_body_lin_vel: 1.0          # mjlab parity (kept)
     motion_body_ang_vel: 1.0          # mjlab parity (kept)
     motion_joint_pos: 0.0             # not used in mjlab dance_102
     motion_joint_vel: 0.0             # not used in mjlab dance_102
     action_rate_l2: -0.1              # mjlab parity (kept)
-    joint_limit: -5.0                 # strengthened toward mjlab -10 (was -2.0)
+    joint_limit: -5.0                 # Stage 1 (mjlab parity direction, was -2.0)
     undesired_contacts: -0.1          # mjlab parity (kept)
