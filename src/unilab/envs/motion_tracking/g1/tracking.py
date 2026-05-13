@@ -312,6 +312,12 @@ class G1MotionTrackingDomainRandomizationProvider(DomainRandomizationProvider):
         info_updates: dict[str, Any] = {
             "current_actions": zero_actions(num_reset, env._num_action),
             "last_actions": zero_actions(num_reset, env._num_action),
+            # Initialise prev_dof_vel to the post-reset joint velocity (which
+            # the backend writes into qvel[:, 6:] in this same reset). This
+            # makes the first post-reset joint_acc reward sample physically
+            # meaningful (Δv from the new starting velocity rather than a
+            # spurious step from the pre-termination velocity).
+            "prev_dof_vel": joint_vel.astype(get_global_dtype()),
         }
 
         dr_cfg = env.cfg.domain_rand
@@ -423,9 +429,16 @@ class G1MotionTrackingEnv(G1BaseEnv):
         self.motion_sampler = MotionSampler(
             self.motion_loader, mode=cfg.sampling_mode, num_envs=num_envs
         )
+        # Cache base actuator gains on the env so torque-penalty rewards
+        # (joint_torque_l2) can approximate the position-control torque
+        # τ ≈ kp·(target_q − q) − kd·qd without querying per-env model variants.
+        # DR (kp/kd ±10–15%) introduces small error vs the true per-env torque,
+        # but the gradient direction (penalise large action / large Δq) is preserved.
+        base_kp, base_kd = backend.get_actuator_gains()
+        self._base_kp = np.asarray(base_kp, dtype=get_global_dtype())
+        self._base_kd = np.asarray(base_kd, dtype=get_global_dtype())
         provider_kwargs: dict[str, Any] = {}
         if cfg.domain_rand.randomize_kp or cfg.domain_rand.randomize_kd:
-            base_kp, base_kd = backend.get_actuator_gains()
             provider_kwargs["base_kp"] = base_kp
             provider_kwargs["base_kd"] = base_kd
         if cfg.domain_rand.randomize_geom_friction:
@@ -496,6 +509,8 @@ class G1MotionTrackingEnv(G1BaseEnv):
             "action_rate_l2": self._reward_action_rate_l2,
             "joint_limit": self._reward_joint_limit,
             "undesired_contacts": self._reward_undesired_contacts,
+            "joint_acc_l2": self._reward_joint_acc_l2,
+            "joint_torque_l2": self._reward_joint_torque_l2,
         }
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
@@ -792,6 +807,9 @@ class G1MotionTrackingEnv(G1BaseEnv):
                 log[f"reward/{name}"] = float(np.mean(weighted_rew))
 
         info["log"] = log
+        # Stash current dof_vel for next step's joint_acc_l2 reward computation.
+        # Reset envs will overwrite this via info_updates from build_reset_plan.
+        info["prev_dof_vel"] = dof_vel.copy()
         return reward * self._cfg.ctrl_dt
 
     # Reward functions
@@ -891,3 +909,37 @@ class G1MotionTrackingEnv(G1BaseEnv):
         upper_violation = np.maximum(0, dof_pos - upper)
         violation = lower_violation + upper_violation
         return np.asarray(np.sum(np.square(violation), axis=1), dtype=get_global_dtype())
+
+    def _reward_joint_acc_l2(self, info: dict) -> np.ndarray:
+        """Penalise joint accelerations (Δdof_vel / ctrl_dt). mjlab parity.
+
+        Sim2real benefit: discourages jerky joint motions that stress motors
+        and excite unmodelled dynamics on the real robot. Falls back to zero
+        on the first step before prev_dof_vel is populated.
+        """
+        dof_vel = info["dof_vel"]
+        prev_dof_vel = info.get("prev_dof_vel")
+        if prev_dof_vel is None or prev_dof_vel.shape != dof_vel.shape:
+            return np.zeros((self._num_envs,), dtype=get_global_dtype())
+        joint_acc = (dof_vel - prev_dof_vel) / self._cfg.ctrl_dt
+        return np.asarray(np.sum(np.square(joint_acc), axis=1), dtype=get_global_dtype())
+
+    def _reward_joint_torque_l2(self, info: dict) -> np.ndarray:
+        """Penalise approximate position-control torque τ ≈ kp·(target−q) − kd·qd.
+
+        target_q is built from the *executed* action (last_actions when
+        simulate_action_latency=True, else current_actions) so the penalty
+        targets the same command the actuators actually saw. Uses cached base
+        kp/kd; per-env DR multipliers (±10–15%) introduce small error but the
+        gradient direction (penalise large effort) is preserved. mjlab parity.
+        """
+        dof_pos = info["dof_pos"]
+        dof_vel = info["dof_vel"]
+        if self._cfg.control_config.simulate_action_latency:
+            exec_actions = info["last_actions"]
+        else:
+            exec_actions = info["current_actions"]
+        action_scale = self._cfg.control_config.action_scale
+        target_q = exec_actions * action_scale + self.default_angles
+        torque = self._base_kp * (target_q - dof_pos) - self._base_kd * dof_vel
+        return np.asarray(np.sum(np.square(torque), axis=1), dtype=get_global_dtype())

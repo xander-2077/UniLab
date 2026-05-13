@@ -67,56 +67,61 @@
 #   with no intentional pushes, so 450N (Δv 0.3 m/s) was still too aggressive.
 #   The root_pos=1.0 reward change from this stage is KEPT in Stage 3.
 #
-# Stage 3 (ACTIVE): minimal push covering only natural-disturbance levels.
-#   Deployment scenario constraints:
-#     - flat ground only
-#     - no intentional human pushes
-#     - natural disturbances: foot slip, motor jitter, kp drift, IMU noise —
-#       most already covered by friction/mass/com/kp/kd/encoder_bias/latency DR.
-#   Push DR is therefore reduced to a tiny "natural stumble" level:
-#     - max_force:     [450, 450, 180] -> [150, 150, 60]   # Δv 0.3 -> 0.1 m/s
-#     - push_interval: 150             -> 300              # 3s -> 6s (very sparse)
-#   Δv 0.1 m/s ≈ a strong foot slip on a smooth surface. Every 6s = ~rare.
-#   ~3% of Stage 1.5 energy density; combined with the other DR channels,
-#   still trains the policy against the realistic flat-ground disturbance set.
+# Stage 3 (DONE): minimal push [150,150,60] @ 6s + reward weights from 2.5.
+#   Diagnosis: push cut too aggressively. Stage 3 has dual loss:
+#   (1) sim2real disturbance coverage (we agreed minimal is OK for flat-ground demo)
+#   (2) TRAINING PRESSURE for fine-grained control — this matters regardless of
+#       deployment scenario, and Stage 3 lost it.
+#   Result vs Stage 2 (which had push 300/200 = same direction, ~6x more energy):
+#     - motion_global_root_pos raw 0.40 -> 0.45   (+12%, marginal despite weight=1.0)
+#     - motion_global_root_ori raw 0.85 -> 0.80   (-6%, slight drop)
+#     - motion_body_ori raw       0.65 -> 0.40    (-38%, MAJOR regression)
+#     - motion_body_ang_vel raw   0.32 -> 0.10    (-69%, MAJOR regression)
+#     - joint_limit violation     0.002 -> 0.01   (5x worse — joints hit limits)
+#     - critic_grad_norm          0.08 -> 0.15    (critic noisier under weak reward signal)
+#   Empirical threshold: Stage 1.5 (push 600/100) and Stage 2 (push 300/200) both
+#   sustained body_ori~0.65 / ang_vel~0.32. Stage 3 (push 150/300) didn't.
+#   So [300,300,120] @ 4s is the *minimum* effective training-pressure dose.
 #
-#   Why NOT push_robots=false: zero push leads to overfitting on "perfect floor
-#   + zero disturbance" sim distribution; even 0.05 m/s real-world micro-slips
-#   could destabilize a policy that has never seen any dynamic perturbation.
-#   The friction/kp DR randomizes between envs (model mismatch) but does NOT
-#   inject intra-episode dynamic perturbations — push is the only such channel.
+# Stage 4 (ACTIVE — P1): restore push training pressure + implicit tracking
+#                         pressure via anchor termination, with safety hedges.
+#   Rationale: push during TRAINING is a training tool (forces fine control),
+#   not a sim2real disturbance simulator. The trained policy does NOT generate
+#   push at deploy time — user's "minimal push at deploy" requirement is met
+#   regardless of training-time push intensity.
+#   Changes from Stage 3:
+#     - max_force:                [150,150,60] -> [300, 300, 120]  # Δv 0.1 -> 0.2 m/s
+#     - push_interval:            300          -> 200              # 6s -> 4s
+#     - anchor_pos_z_threshold:   0.5          -> 0.40             # tighten anchor only
+#     - ee_body_pos_z_threshold:  0.5          (KEPT)              # avoid terminated_rate spike
+#   Why ee_body_pos stays at 0.5: original green run had terminated_rate 0.4
+#   driven by ee_body terminations. Tightening that channel risks SAC replay
+#   buffer contamination. Anchor-only tightening provides root tracking
+#   discipline without killing recoverable trajectories.
+#   reward weights all kept from Stage 2.5/3 (root_pos=1.0, root_ori=1.0,
+#   joint_limit=-5.0, body weights all 1.0).
 #
-#   reward.motion_global_root_pos kept at 1.0 (Stage 2.5 compensation for the
-#   enable_zero_anchor_pos obs zeroing, still needed under No-State-Estimation).
+# Stage 5 (P3.1 — code change, only after Stage 4 lands): register joint_acc_l2
+#  and joint_torque_l2 reward functions in tracking.py _init_reward_functions:
+#     - joint_acc_l2:    -2.5e-7   (mjlab parity — sim2real-friendly accel penalty)
+#     - joint_torque_l2: -1e-5     (mjlab parity — sim2real-friendly torque penalty)
+#  These attack action smoothness / joint_limit violation / motor stress, not
+#  tracking gap. Warm-start fine-tune from Stage 4 checkpoint (~30 M steps).
 #
-# Stage 4 (turn off action latency — if Stage 3 still has tracking gap):
+# Stage 6 (P3.2 — code change, only if root_pos still <0.55 after Stage 4+5):
+#  Add 5-10 frame obs history (KungfuBot style) to compensate for the
+#  enable_zero_anchor_pos limit. Requires updating sim_prototype.py and ONNX
+#  export to maintain a ring buffer at deploy time.
+#
+# Stage 7 (turn off action latency — only if Stage 4 still leaves tracking lag):
 #   env.control_config.simulate_action_latency: true -> false
 #   Train ~50 M steps without latency, save checkpoint, then re-enable latency
 #   and fine-tune from that checkpoint.
 #
-# Stage 5 (tighten termination — alternative tracking-pressure source if Stage 3
-#  produces visually-loose dance with low root_pos raw):
-#   env.anchor_pos_z_threshold: 0.5 -> 0.35
-#   env.ee_body_pos_z_threshold: 0.5 -> 0.35
-#   Provides implicit "stay near reference" pressure without adding push.
-#
-# Stage 6 (mjlab-parity DR tightening — only if Stage 3-5 still stall):
-#     env.domain_rand.randomize_base_mass:  true -> false        # mjlab does not randomize
-#     env.domain_rand.com_offset_x:         [-0.05, 0.05] -> [-0.025, 0.025]   # mjlab range
-#     env.domain_rand.randomize_geom_friction: true -> false     # ablate friction DR
-#     env.domain_rand.enable_encoder_bias:  true -> false        # ablate encoder bias
-#
-# Stage 5 (algo-side fine-tune — only if Stages 1-4 exhausted):
+# Stage 8 (algo-side fine-tune — only if Stages 4-7 exhausted):
 #     algo.tau:               0.05 -> 0.005          # slower target Q tracking
 #     algo.updates_per_step:  4    -> 2              # reduce off-policy stale ratio
 #     algo.algo_params.target_entropy_ratio: 0.5 -> 0.3
-#
-# TODO (NOT applied here, needs code change in src/unilab/envs/motion_tracking/g1/tracking.py
-#       to register two new reward functions in `_init_reward_functions`):
-#   - joint_acc_l2:    -2.5e-7   (mjlab parity — sim2real-friendly accel penalty)
-#   - joint_torque_l2: -1e-5     (mjlab parity — sim2real-friendly torque penalty)
-#   Adding these here without registering will be silently dropped at runtime
-#   (see tracking.py reward loop: unknown names skipped).
 # =============================================================================
 training:
   task_name: G1MotionTrackingSAC
@@ -142,7 +147,13 @@ env:
     # One-step action latency: model the SDK send/recv delay so the trained
     # actor sees the same delayed feedback the C++ controller will produce.
     simulate_action_latency: true
-  anchor_pos_z_threshold: 0.5
+  # Stage 4: tighter anchor termination provides implicit "stay near reference"
+  # pressure for root_pos (which is unobservable to the actor under
+  # enable_zero_anchor_pos=true). Empirically supported by mjlab which uses 0.25.
+  anchor_pos_z_threshold: 0.40
+  # Stage 4: KEPT at 0.5. Tightening ee_body led to terminated_rate 0.4 in the
+  # original green run, contaminating the SAC replay buffer with short broken
+  # trajectories. Anchor-only tightening is the safer lever.
   ee_body_pos_z_threshold: 0.5
   truncate_on_clip_end: true
   noise_config:
@@ -172,18 +183,18 @@ env:
     randomize_gravity: false         # mjlab does not randomize; ranges were no-op anyway
     gravity_range: [[0.0, 0.0, -9.81], [0.0, 0.0, -9.81]]
     push_robots: true
-    # Stage 3: 300 ctrl steps ≈ 6 s. Very sparse — only there to prevent the
-    # policy from overfitting to a perfect-floor distribution; not a meaningful
-    # disturbance-rejection trainer. Reduce further (or set push_robots=false)
-    # only if Stage 3 shows no tracking issues.
-    push_interval: 300
-    # Stage 3: Δv 0.1 m/s ≈ a strong foot slip on smooth indoor floor. This is
-    # the "natural stumble" level for flat-ground dance deployment without
-    # intentional pushes. On a ~30 kg base: F = m·Δv/dt → ±150/150/60 N.
-    # ~3% energy density vs Stage 1.5 (was [600,600,240]). The bulk of sim2real
-    # robustness now comes from friction/mass/com/kp/kd/encoder_bias DR which
-    # randomize the model, not the dynamics.
-    max_force: [150.0, 150.0, 60.0]
+    # Stage 4: 200 ctrl steps ≈ 4 s. Empirical minimum interval that sustains
+    # body_ori / body_ang_vel tracking (Stage 1.5 @ 100 and Stage 2 @ 200 both
+    # worked; Stage 3 @ 300 collapsed both metrics). Same as Stage 2's interval.
+    push_interval: 200
+    # Stage 4: Δv 0.2 m/s — the empirical minimum effective training-pressure
+    # dose. Stage 2's [300,300,120] sustained body_ori~0.65 / body_ang_vel~0.32;
+    # Stage 3's [150,150,60] dropped them to 0.40/0.10. On a ~30 kg base:
+    # F = m·Δv/dt → ±300/300/120 N. ~25% energy density of mjlab parity, but
+    # critically: this is TRAINING pressure, NOT a sim2real disturbance model.
+    # The trained policy will not generate push at deploy time regardless of
+    # what value is used here.
+    max_force: [300.0, 300.0, 120.0]
     push_body_name: null             # default = pelvis (free-joint root)
     randomize_kp: true
     kp_multiplier_range: [0.9, 1.1]
@@ -199,9 +210,10 @@ env:
     encoder_bias_range: [-0.01, 0.01]
 reward:
   scales:
-    # Stage 3 active: kept root_pos=1.0 from Stage 2.5 to compensate for
-    # enable_zero_anchor_pos. Especially needed in Stage 3 since push is tiny —
-    # reward becomes the primary tracking-discipline signal.
+    # Stage 4 + Stage 5 (P3.1) active. Stage 5 adds two new sim2real-friendly
+    # penalties registered in tracking.py:_init_reward_functions:
+    #   joint_acc_l2 (Δdof_vel/ctrl_dt) and joint_torque_l2 (kp·Δq − kd·qd).
+    # mjlab parity weights from g1_29dof/dance_102/tracking_env_cfg.py.
     motion_global_root_pos: 1.0       # Stage 2.5 (was 0.5; compensate obs zeroing of anchor_pos)
     motion_global_root_ori: 1.0       # Stage 1.5 (was 0.5; restore root attitude authority)
     motion_body_pos: 1.0              # Stage 1 (mjlab parity, was 2.0)
@@ -213,3 +225,5 @@ reward:
     action_rate_l2: -0.1              # mjlab parity (kept)
     joint_limit: -5.0                 # Stage 1 (mjlab parity direction, was -2.0)
     undesired_contacts: -0.1          # mjlab parity (kept)
+    joint_acc_l2: -2.5e-7             # Stage 5 (mjlab parity — sim2real motor-friendly)
+    joint_torque_l2: -1e-5            # Stage 5 (mjlab parity — sim2real motor-friendly)
