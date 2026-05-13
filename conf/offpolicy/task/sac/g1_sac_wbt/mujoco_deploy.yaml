@@ -30,22 +30,53 @@
 #   only has motion_anchor_ori_b (6-d cols) as an OBSERVABLE root-state signal,
 #   and its reward weight (0.5) is too small to compete with the 4.0 body cluster.
 #
-# Stage 1.5 (ACTIVE): surgical fix for residual torso sway.
-#   - motion_global_root_ori: 0.5 -> 1.0  (match body_ori weight; rebalance
-#                                          root:body from 1:4 to 1.5:4)
-#   Why only root_ori (not root_pos): root_ori is observable via motion_anchor_ori_b
-#   in actor obs; root_pos is zeroed by enable_zero_anchor_pos so raising its
-#   weight rewards a quantity the policy cannot directly perceive.
+# Stage 1.5 (DONE): bumped motion_global_root_ori 0.5 -> 1.0.
+#   Result: motion_global_root_ori raw 0.54 -> 0.85 (yellow=0.9, fully recovered);
+#   episode/length 210 -> 250; terminated_rate 0.2 -> 0.08 (≈ yellow);
+#   SAC dynamics healthy (actor_loss improved, critic_grad_norm stable).
+#   Remaining visible symptom: large-amplitude lateral sway of the pelvis. This
+#   maps to motion_global_root_pos raw 0.55 (yellow=0.95), NOT to root_ori
+#   anymore — i.e. torso orientation tracks fine but the pelvis drifts under
+#   pushes. Cause analysis:
+#     * Physical: 600N x 0.02s = 0.4 m/s lateral velocity injection every 2 s;
+#       recovery takes ~0.5-1 s, so root_pos error is non-zero a large fraction
+#       of the time regardless of policy quality.
+#     * Observation: enable_zero_anchor_pos=true hides motion_anchor_pos_b from
+#       actor obs, so the policy can only detect lateral drift indirectly via
+#       foot contact asymmetry / joint deviations.
+#     * Conclusion: further reward retune on root_pos has limited effect because
+#       the policy cannot directly perceive what it is being asked to minimize.
+#       Must reduce the physical push source instead.
 #
-# Stage 2 (DR softening — if Stage 1.5 still leaves torso sway at ~50 M steps):
-#   Edit `env.domain_rand` block below to:
-#     max_force:        [600,600,240] -> [300, 300, 120]
-#     push_interval:    100           -> 200          # ≈4 s
-#   And tighten termination so SAC sees fewer broken trajectories:
-#     env.anchor_pos_z_threshold: 0.5 -> 0.25
-#     env.ee_body_pos_z_threshold: 0.5 -> 0.25
+# Stage 2 (DONE): halved push intensity AND doubled interval.
+#   - max_force: [600,600,240] -> [300,300,120], push_interval 100 -> 200.
+#   Result: visible lateral sway ✅ reduced; episode/length 260 (best so far);
+#   BUT motion_global_root_pos raw DEGRADED 0.54 -> 0.40 — tracking accuracy
+#   actually got worse, contrary to expectation.
+#   Cause: cutting push -75% removes ~4x the training samples where the policy
+#   sees "drifted-from-reference -> recover" transitions. Combined with
+#   enable_zero_anchor_pos=true (no anchor_pos signal in actor obs), the policy
+#   loses its main pressure to stay near the reference and lets the root slowly
+#   drift between sparse 4s pushes. The green-run evidence supports this:
+#   green at push=600/100 + root_pos_weight=1.0 hit root_pos raw 0.55, slightly
+#   better than gray/blue at push=600/100 + root_pos_weight=0.5 → push IS a
+#   useful training signal for root_pos tracking, can't be cut too aggressively.
 #
-# Stage 3 (turn off action latency — if Stage 2 still stalls):
+# Stage 2.5 (ACTIVE): rebalance push and explicitly compensate root_pos signal.
+#   - max_force:     [300,300,120] -> [450, 450, 180]   # Δv 0.2 -> 0.3 m/s
+#   - push_interval: 200           -> 150               # 4s -> 3s (mid of mjlab 1-3s)
+#   - reward.motion_global_root_pos: 0.5 -> 1.0  (back to yellow/green level)
+#   Rationale: ~50% push energy density vs Stage 1.5 (vs Stage 2's 25%) keeps
+#   meaningful disturbance-rejection training; 3s interval is inside mjlab's
+#   1-3s deployed range. Root_pos weight bumped to 1.0 to provide stronger
+#   Q-bootstrap signal compensating for the obs zeroing — this is a
+#   SAC+No-State-Estimation adaptation, NOT a deviation from mjlab parity
+#   (mjlab uses 0.5 because it has anchor_pos directly in actor obs).
+#   Sim2real impact: push DR matches mjlab interval range, Δv 0.3 m/s still
+#   covers typical real-world bumps; all other DR (friction/mass/com/encoder/
+#   kp/kd/latency) kept ON.
+#
+# Stage 3 (turn off action latency — if Stage 2.5 still stalls):
 #   env.control_config.simulate_action_latency: true -> false
 #   Train ~50 M steps without latency, save checkpoint, then re-enable latency
 #   and fine-tune from that checkpoint.
@@ -122,10 +153,16 @@ env:
     randomize_gravity: false         # mjlab does not randomize; ranges were no-op anyway
     gravity_range: [[0.0, 0.0, -9.81], [0.0, 0.0, -9.81]]
     push_robots: true
-    push_interval: 100               # ≈2 s @ ctrl_dt=0.02 (mjlab interval 1-3 s)
-    # Force impulse equivalent to mjlab's velocity injection on a ~30 kg base
-    # over one ctrl_dt: F = m·Δv/dt → ±600/600/240 N for ±0.4/0.4/0.16 m/s.
-    max_force: [600.0, 600.0, 240.0]
+    # Stage 2.5: 150 ctrl steps ≈ 3 s, inside mjlab's deployed 1-3 s window.
+    # (was 100 in Stage 1.5, 200 in Stage 2; Stage 2 was too sparse and let
+    # root drift between pushes.)
+    push_interval: 150
+    # Stage 2.5: Δv 0.3 m/s — between Stage 1.5's 0.4 (too brutal for SAC)
+    # and Stage 2's 0.2 (too weak; tracking signal degraded). 0.3 m/s on a
+    # ~30 kg base over one ctrl_dt: F = m·Δv/dt → ±450/450/180 N.
+    # ~50% energy density of mjlab parity; still covers typical real-world
+    # disturbances (foot slip ~0.1-0.15 m/s, light bumps ~0.2 m/s).
+    max_force: [450.0, 450.0, 180.0]
     push_body_name: null             # default = pelvis (free-joint root)
     randomize_kp: true
     kp_multiplier_range: [0.9, 1.1]
@@ -141,8 +178,9 @@ env:
     encoder_bias_range: [-0.01, 0.01]
 reward:
   scales:
-    # Stage 1.5 active: bumped root_ori to fix residual torso sway after Stage 1.
-    motion_global_root_pos: 0.5       # Stage 1 (mjlab parity, was 1.0)
+    # Stage 2.5 active: root_pos back to 1.0 to compensate for the missing
+    # anchor_pos obs channel; other weights kept from Stage 1.5.
+    motion_global_root_pos: 1.0       # Stage 2.5 (was 0.5; compensate obs zeroing of anchor_pos)
     motion_global_root_ori: 1.0       # Stage 1.5 (was 0.5; restore root attitude authority)
     motion_body_pos: 1.0              # Stage 1 (mjlab parity, was 2.0)
     motion_body_ori: 1.0              # mjlab parity (kept)
