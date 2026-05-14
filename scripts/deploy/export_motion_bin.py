@@ -60,6 +60,15 @@ def main():
     ap.add_argument("--motion", type=Path, default=DEFAULT_NPZ)
     ap.add_argument("--scene", type=Path, default=DEFAULT_SCENE)
     ap.add_argument("--output", "-o", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--start-frame", type=int, default=0,
+                    help="First frame to include (inclusive). Default 0.")
+    end_group = ap.add_mutually_exclusive_group()
+    end_group.add_argument("--end-frame", type=int, default=None,
+                           help="One past the last frame (exclusive). "
+                                "Default = NPZ frame count.")
+    end_group.add_argument("--duration", type=float, default=None,
+                           help="Seconds to keep starting at --start-frame. "
+                                "Resolved to frames via NPZ fps.")
     args = ap.parse_args()
 
     if not args.motion.exists():
@@ -84,15 +93,37 @@ def main():
         body_lin_vel_w = data["body_lin_vel_w"].astype(np.float32)
         body_ang_vel_w = data["body_ang_vel_w"].astype(np.float32)
 
-    num_frames, num_joints = joint_pos.shape
+    total_frames, num_joints = joint_pos.shape
     num_bodies = len(TRACKED_BODY_NAMES)
 
     if joint_pos.shape != joint_vel.shape:
         raise SystemExit(f"joint_pos {joint_pos.shape} != joint_vel {joint_vel.shape}")
     if num_joints != 29:
         raise SystemExit(f"Expected 29 joints, got {num_joints}")
-    if body_pos_w.shape[0] != num_frames:
-        raise SystemExit(f"body_pos_w frames {body_pos_w.shape[0]} != {num_frames}")
+    if body_pos_w.shape[0] != total_frames:
+        raise SystemExit(f"body_pos_w frames {body_pos_w.shape[0]} != {total_frames}")
+
+    start = args.start_frame
+    if args.duration is not None:
+        if args.duration <= 0:
+            raise SystemExit(f"--duration must be > 0, got {args.duration}")
+        end = start + int(round(args.duration * fps))
+    elif args.end_frame is not None:
+        end = args.end_frame
+    else:
+        end = total_frames
+    if not (0 <= start < end <= total_frames):
+        raise SystemExit(
+            f"Invalid frame range [{start}, {end}); valid is [0, {total_frames}]"
+        )
+    if (start, end) != (0, total_frames):
+        joint_pos = joint_pos[start:end]
+        joint_vel = joint_vel[start:end]
+        body_pos_w = body_pos_w[start:end]
+        body_quat_w = body_quat_w[start:end]
+        body_lin_vel_w = body_lin_vel_w[start:end]
+        body_ang_vel_w = body_ang_vel_w[start:end]
+    num_frames = end - start
     if body_pos_w.shape[1] < max(body_ids) + 1:
         raise SystemExit(
             f"NPZ body axis len {body_pos_w.shape[1]} insufficient for max body_id {max(body_ids)}"
