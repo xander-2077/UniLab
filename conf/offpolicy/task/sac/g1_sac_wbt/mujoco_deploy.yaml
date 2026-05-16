@@ -128,7 +128,7 @@ training:
   sim_backend: mujoco
 algo:
   num_envs: 4096
-  max_iterations: 40000
+  max_iterations: 120000
   save_interval: 1000
   # --- holosoma WBT-specific overrides (vs sac.yaml defaults) ---
   gamma: 0.99
@@ -142,6 +142,7 @@ algo:
     target_entropy_ratio: 0.5
     max_grad_norm: 10.0
 env:
+  sim_dt: 0.005
   control_config:
     action_scale: 2.0
     # One-step action latency: model the SDK send/recv delay so the trained
