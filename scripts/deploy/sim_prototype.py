@@ -179,6 +179,11 @@ def main():
     ap.add_argument("--cheat-anchor", action="store_true",
                     help="Use sim-true robot torso pos for anchor (debug; "
                          "would not be available on real robot).")
+    ap.add_argument("--init-mode", choices=["rsi", "stand"], default="rsi",
+                    help="rsi = teleport robot to motion frame 0 (training-time "
+                         "reset condition; default). stand = leave robot in the "
+                         "'stand' keyframe pose (== FixStand default_angles, "
+                         "matching the deploy-time FSM transition).")
     args = ap.parse_args()
 
     with open(args.config) as f:
@@ -225,22 +230,30 @@ def main():
     substeps = max(1, int(round(ctrl_dt / sim_dt)))
     print(f"sim_dt={sim_dt:.5f}, ctrl_dt={ctrl_dt:.3f}, substeps/ctrl={substeps}")
 
-    # Init pose: Reference State Initialization (RSI) — start robot at motion
-    # frame 0's pose, matching what the training env does on reset.
+    # Init pose: two modes.
+    #   rsi   — Reference State Initialization: teleport robot to motion frame
+    #           0's pose (matches the training env's reset condition).
+    #   stand — leave robot in the "stand" keyframe pose (== FixStand
+    #           default_angles), which is what the C++ FSM sees at the
+    #           FixStand → State_WBT transition on the real robot.
+    # Use --init-mode stand to reproduce the deploy-time "first few seconds of
+    # slipping while the policy snaps the robot from default_angles to dance
+    # frame 0" scenario in simulation, without touching hardware.
     key_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "stand")
     if key_id < 0:
         raise SystemExit("'stand' keyframe not found")
     mujoco.mj_resetDataKeyframe(model, data, key_id)
 
     pelvis_id_in_tracked = 0  # 'pelvis' is first in TRACKED_BODY_NAMES
-    data.qpos[0:3] = motion["body_pos_w"][0, pelvis_id_in_tracked]
-    data.qpos[3:7] = motion["body_quat_w"][0, pelvis_id_in_tracked]  # wxyz
-    data.qpos[7:] = motion["joint_pos"][0]
-    data.qvel[0:3] = motion["body_lin_vel_w"][0, pelvis_id_in_tracked]
-    data.qvel[3:6] = motion["body_ang_vel_w"][0, pelvis_id_in_tracked]
-    data.qvel[6:] = motion["joint_vel"][0]
+    if args.init_mode == "rsi":
+        data.qpos[0:3] = motion["body_pos_w"][0, pelvis_id_in_tracked]
+        data.qpos[3:7] = motion["body_quat_w"][0, pelvis_id_in_tracked]  # wxyz
+        data.qpos[7:] = motion["joint_pos"][0]
+        data.qvel[0:3] = motion["body_lin_vel_w"][0, pelvis_id_in_tracked]
+        data.qvel[3:6] = motion["body_ang_vel_w"][0, pelvis_id_in_tracked]
+        data.qvel[6:] = motion["joint_vel"][0]
     mujoco.mj_forward(model, data)
-    print(f"RSI: robot init from motion frame 0 — base xyz={data.qpos[:3]}, "
+    print(f"init_mode={args.init_mode}: base xyz={data.qpos[:3]}, "
           f"base quat={data.qpos[3:7]}")
 
     default_angles = np.asarray(cfg["default_angles"], dtype=np.float32)
