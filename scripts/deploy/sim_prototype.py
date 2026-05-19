@@ -83,6 +83,8 @@ def build_obs_from_layout(
     Every layout entry must resolve to a known segment with matching dim.
     Raises SystemExit on any mismatch — the prototype refuses to fabricate
     a vector that disagrees with the deploy contract.
+
+    Single-step path only; history-aware assembly goes through ``ObsAssembler``.
     """
     parts: list[np.ndarray] = []
     for seg in layout:
@@ -106,7 +108,98 @@ def build_obs_from_layout(
     return obs
 
 
-def assemble_obs(
+class ObsAssembler:
+    """Schema-driven actor obs assembler with per-term history buffers.
+
+    Mirrors the deploy-side ObservationManager + ObservationTermCfg behaviour
+    byte-for-byte so sim_prototype validates the same obs vector State_WBT
+    will produce on the real robot:
+
+      * Per layout term, owns a (H, dim) deque-like ring buffer (oldest at row 0).
+      * ``reset(segments)`` fills all H rows with the current value (matches
+        deploy ObservationTermCfg::reset which calls add() H times).
+      * ``step(segments)`` shifts oldest out, writes current at the last row
+        (matches deploy add()).
+      * ``assemble()`` concatenates each term's full history oldest-first,
+        then concatenates across terms in layout order (matches deploy
+        use_gym_history=false mode in ObservationManager::compute_group).
+
+    History length per term is read from ``layout[i]['history_length']``,
+    defaulting to 1 (single-step / no history). Total assembled dim is
+    sum(dim * history_length) over all terms.
+    """
+
+    def __init__(self, cfg: dict) -> None:
+        self.obs_dim = int(cfg["obs_dim"])
+        self.layout = cfg["obs_layout"]
+        if cfg.get("use_gym_history", False):
+            raise SystemExit(
+                "sim_prototype assumes use_gym_history=false (group-by-term flatten); "
+                "set it to false in deploy_config.yaml or extend ObsAssembler"
+            )
+        self._buffers: dict[str, np.ndarray] = {}
+        self._hist_len: dict[str, int] = {}
+        layout_total = 0
+        for seg in self.layout:
+            name = seg["name"]
+            dim = int(seg["dim"])
+            h_len = int(seg.get("history_length", 1))
+            if h_len < 1:
+                raise SystemExit(f"obs term '{name}' has invalid history_length={h_len}")
+            self._buffers[name] = np.zeros((h_len, dim), dtype=np.float32)
+            self._hist_len[name] = h_len
+            layout_total += dim * h_len
+        if layout_total != self.obs_dim:
+            raise SystemExit(
+                f"cfg internal inconsistency: sum(dim*history_length)={layout_total} "
+                f"!= obs_dim={self.obs_dim}"
+            )
+        self._primed = False
+
+    def reset(self, segments: dict[str, np.ndarray]) -> np.ndarray:
+        """Fill every history slot with the current segment values (deploy parity)."""
+        for seg in self.layout:
+            name = seg["name"]
+            self._set_validated(name, segments[name])
+            self._buffers[name][:] = self._buffers[name][-1:, :]
+        self._primed = True
+        return self.assemble()
+
+    def step(self, segments: dict[str, np.ndarray]) -> np.ndarray:
+        """Push current values; auto-primes on the first call."""
+        if not self._primed:
+            return self.reset(segments)
+        for seg in self.layout:
+            name = seg["name"]
+            buf = self._buffers[name]
+            buf[:-1] = buf[1:]
+            self._set_validated(name, segments[name])
+        return self.assemble()
+
+    def assemble(self) -> np.ndarray:
+        parts: list[np.ndarray] = []
+        for seg in self.layout:
+            name = seg["name"]
+            parts.append(self._buffers[name].reshape(-1))
+        obs = np.concatenate(parts, axis=0).astype(np.float32, copy=False)
+        if obs.size != self.obs_dim:
+            raise SystemExit(
+                f"assembled obs dim {obs.size} != cfg.obs_dim {self.obs_dim}"
+            )
+        return obs
+
+    def _set_validated(self, name: str, value) -> None:
+        buf = self._buffers[name]
+        dim = buf.shape[1]
+        arr = np.asarray(value, dtype=np.float32).reshape(-1)
+        if arr.size != dim:
+            raise SystemExit(
+                f"obs segment '{name}': expected dim {dim}, got {arr.size}"
+            )
+        buf[-1, :] = arr
+
+
+def compute_obs_segments(
     cfg: dict,
     motion_frame: dict,
     *,
@@ -116,10 +209,13 @@ def assemble_obs(
     dof_pos: np.ndarray,
     dof_vel: np.ndarray,
     last_actions: np.ndarray,
-) -> np.ndarray:
-    """Build the actor obs vector in the exact training segment order.
+) -> dict[str, np.ndarray]:
+    """Compute the current-step value of every potential obs segment.
 
-    All inputs are batch-less (1D arrays). Output is (cfg['obs_dim'],) float32.
+    Returns a dict keyed by segment name. Only the segments listed in
+    cfg['obs_layout'] are consumed downstream; unused keys are harmless.
+
+    All inputs are batch-less (1D arrays). Each output segment is float32.
     """
     default_angles = np.asarray(cfg["default_angles"], dtype=np.float32)
     anchor_idx = int(cfg["anchor_body_idx_in_tracked"])
@@ -146,20 +242,21 @@ def assemble_obs(
             f"linvel_strategy='{linvel_strategy}' not supported in prototype; "
             "G1 deploy must use 'zero'"
         )
-    linvel = np.zeros(3, dtype=np.float32)
+    base_lin_vel = np.zeros(3, dtype=np.float32)
 
-    segments = {
+    return {
         "command_joint_pos": ref_joint_pos.astype(np.float32),
         "command_joint_vel": ref_joint_vel.astype(np.float32),
         "motion_anchor_pos_b": motion_anchor_pos_b,
         "motion_anchor_ori_b": motion_anchor_ori_b,
-        "linvel": linvel,
+        # Two aliases so legacy schemas (which used 'linvel') still work.
+        "base_lin_vel": base_lin_vel,
+        "linvel": base_lin_vel,
         "gyro": gyro.astype(np.float32),
         "joint_pos_rel": (dof_pos - default_angles).astype(np.float32),
         "dof_vel": dof_vel.astype(np.float32),
         "last_actions": last_actions.astype(np.float32),
     }
-    return build_obs_from_layout(cfg["obs_layout"], segments, int(cfg["obs_dim"]))
 
 
 def main():
@@ -191,12 +288,15 @@ def main():
     motion = load_motion_bin(args.motion)
 
     expected_dim = int(cfg["obs_dim"])
-    layout_total = sum(int(s["dim"]) for s in cfg["obs_layout"])
+    layout_total = sum(
+        int(s["dim"]) * int(s.get("history_length", 1)) for s in cfg["obs_layout"]
+    )
     if layout_total != expected_dim:
         raise SystemExit(
-            f"cfg internal inconsistency: sum(obs_layout dim)={layout_total} "
+            f"cfg internal inconsistency: sum(obs_layout dim*history_length)={layout_total} "
             f"!= obs_dim={expected_dim}"
         )
+    obs_assembler = ObsAssembler(cfg)
 
     use_onnx = (not args.no_onnx) and args.onnx.exists()
     sess = None
@@ -221,7 +321,10 @@ def main():
               "(ctrl = default_angles, no policy in the loop)")
 
     print(f"obs_dim={expected_dim}, layout segments=[" +
-          ", ".join(f"{s['name']}({s['dim']})" for s in cfg["obs_layout"]) + "]")
+          ", ".join(
+              f"{s['name']}({s['dim']}×{int(s.get('history_length', 1))})"
+              for s in cfg["obs_layout"]
+          ) + "]")
 
     model = mujoco.MjModel.from_xml_path(str(args.scene))
     data = mujoco.MjData(model)
@@ -314,13 +417,17 @@ def main():
             robot_torso_pos_w_used = data.xpos[anchor_body_id].astype(np.float32)
         else:
             robot_torso_pos_w_used = robot_anchor_pos_w_locked
-        obs = assemble_obs(
+        current_segments = compute_obs_segments(
             cfg, motion_frame,
             robot_torso_pos_w=robot_torso_pos_w_used,
             robot_torso_quat_w=robot_torso_quat_w,
             gyro=gyro, dof_pos=dof_pos, dof_vel=dof_vel,
             last_actions=last_actions,
         )
+        # Stateful: first call auto-resets (fills history with current segments,
+        # matching State_WBT.cpp's env_->reset() at FSM enter); subsequent calls
+        # push current and drop oldest (matching ObservationTermCfg::add).
+        obs = obs_assembler.step(current_segments)
         if not np.all(np.isfinite(obs)):
             raise SystemExit(f"non-finite obs at step {step}")
 

@@ -379,6 +379,10 @@ class G1MotionTrackingDomainRandomizationProvider(DomainRandomizationProvider):
                 dof_vel,
                 all_pos_w[env_ids],
                 all_quat_w[env_ids],
+                # Reset path: fill the proprio history buffer for these envs
+                # with H copies of the post-reset obs (deploy-side parity).
+                env_ids=env_ids,
+                is_reset=True,
             ),
         )
 
@@ -472,6 +476,64 @@ class G1MotionTrackingEnv(G1BaseEnv):
         self._init_reward_functions()
         self._clip_end_truncated = np.zeros((num_envs,), dtype=bool)
 
+        # --- Actor obs proprio history buffers ---
+        # Mirrors deploy-side ObservationManager: per-term oldest-first deque of
+        # length H. Allocated only when H>1 (no overhead for back-compat H=1
+        # runs). Terms historified: gyro, joint_pos_rel, dof_vel, last_actions.
+        # Reference terms (command_*, motion_anchor_*) stay single-step.
+        self._hist_len = max(1, int(cfg.noise_config.obs_history_length))
+        self._hist_buf: dict[str, np.ndarray] | None = None
+        if self._hist_len > 1:
+            n = self._num_action
+            dtype = get_global_dtype()
+            self._hist_buf = {
+                "gyro": np.zeros((num_envs, self._hist_len, 3), dtype=dtype),
+                "joint_pos_rel": np.zeros((num_envs, self._hist_len, n), dtype=dtype),
+                "dof_vel": np.zeros((num_envs, self._hist_len, n), dtype=dtype),
+                "last_actions": np.zeros((num_envs, self._hist_len, n), dtype=dtype),
+            }
+
+    # ------------------------------------------------------------------ #
+    # Actor proprio history buffer maintenance.
+    # Contract — mirrors deploy ObservationManager / ObservationTermCfg:
+    #   * On reset (per env_ids): fill all H slots with current value
+    #     (matches ObservationTermCfg::reset which calls add() H times).
+    #   * On step (all envs): pop oldest, push current at end (== add()).
+    #   * Read order: oldest-first, so flatten(buf[env, :, :]) yields
+    #     [t-H+1, t-H+2, ..., t] concatenated, matching deploy
+    #     ObservationTermCfg::get() (deque front-to-back).
+    # ------------------------------------------------------------------ #
+    def _hist_components(
+        self, gyro: np.ndarray, joint_pos_rel: np.ndarray,
+        dof_vel: np.ndarray, last_actions: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        return {
+            "gyro": gyro,
+            "joint_pos_rel": joint_pos_rel,
+            "dof_vel": dof_vel,
+            "last_actions": last_actions,
+        }
+
+    def _push_obs_history(self, env_ids, components: dict[str, np.ndarray]) -> None:
+        if self._hist_buf is None:
+            return
+        # env_ids may be None (all envs) or an index array. Fancy-indexing on
+        # the LHS handles both; using a tmp copy avoids any overlap risk.
+        sel = slice(None) if env_ids is None else env_ids
+        for key, val in components.items():
+            buf = self._hist_buf[key]
+            # Shift left: buf[..., :-1] <- buf[..., 1:]; then write current at end.
+            buf[sel, :-1] = buf[sel, 1:]
+            buf[sel, -1] = val
+
+    def _fill_obs_history(self, env_ids, components: dict[str, np.ndarray]) -> None:
+        if self._hist_buf is None:
+            return
+        sel = slice(None) if env_ids is None else env_ids
+        for key, val in components.items():
+            # Broadcast current value across all H slots (matches deploy reset).
+            self._hist_buf[key][sel, :] = val[:, None, :]
+
     def _get_body_pose_w(self) -> tuple[np.ndarray, np.ndarray]:
         return self._backend.get_body_pos_w(self.body_ids), self._backend.get_body_quat_w(
             self.body_ids
@@ -482,17 +544,32 @@ class G1MotionTrackingEnv(G1BaseEnv):
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
-        # Actor: command(2n) + [motion_anchor_pos_b(3)?] + motion_anchor_ori_b(6)
-        #        + [linvel(3)?] + gyro(3) + joint_pos(n) + joint_vel(n) + actions(n)
-        # Critic always carries the full set + privileged body transforms.
+        # Actor obs layout (must match _compute_obs assembly order EXACTLY,
+        # which in turn must match deploy-side deploy_config.yaml obs_layout):
+        #   single-step refs:
+        #     command_joint_pos (n) + command_joint_vel (n)
+        #     + [motion_anchor_pos_b (3)? if not enable_zero_anchor_pos]
+        #     + motion_anchor_ori_b (6)
+        #     + [base_lin_vel (3)? if not enable_zero_linvel]
+        #   H-step history (per-term, oldest-first):
+        #     gyro (3) + joint_pos_rel (n) + dof_vel (n) + last_actions (n)
+        # When obs_history_length == 1, behaviour is bit-identical to the
+        # pre-history code path (back-compat).
+        # Critic always carries the full set + privileged body transforms,
+        # single-step (no history) — matches BeyondMimic-style asymmetric AC.
         n = self._num_action
         noise_cfg = self._cfg.noise_config
-        actor_dim = 6 + 3 + n * 5  # ori + gyro + 2n command + 3n proprio
+        H = max(1, int(getattr(noise_cfg, "obs_history_length", 1)))
+
+        single_step_dim = 2 * n + 6  # command(2n) + anchor_ori_b(6)
         if not noise_cfg.enable_zero_anchor_pos:
-            actor_dim += 3
+            single_step_dim += 3
         if not noise_cfg.enable_zero_linvel:
-            actor_dim += 3
-        critic_dim = 3 + 6 + 3 + 3 + n * 5  # full unmasked actor view
+            single_step_dim += 3
+        proprio_step_dim = 3 + 3 * n  # gyro + joint_pos_rel + dof_vel + last_actions
+        actor_dim = single_step_dim + H * proprio_step_dim
+
+        critic_dim = 3 + 6 + 3 + 3 + n * 5  # anchor_pos+ori, linvel, gyro, 5n proprio
         critic_extra_dim = len(self._cfg.body_names) * 9
         return {"obs": actor_dim, "critic": critic_dim + critic_extra_dim}
 
@@ -662,8 +739,17 @@ class G1MotionTrackingEnv(G1BaseEnv):
         dof_vel: np.ndarray,
         robot_body_pos_w: np.ndarray,
         robot_body_quat_w: np.ndarray,
+        env_ids: np.ndarray | None = None,
+        is_reset: bool = False,
     ) -> dict[str, np.ndarray]:
-        """Compute observations as dict with actor and critic groups."""
+        """Compute observations as dict with actor and critic groups.
+
+        ``env_ids`` is None for the per-step path (all envs); the reset path
+        passes the reset env index array with ``is_reset=True``, which causes
+        the proprio history buffer for those envs to be FILLED with the
+        current value across all H slots (matches the deploy-side
+        ObservationManager.reset() semantics, byte-for-byte).
+        """
         num_envs = linvel.shape[0]
         command = np.concatenate(
             [motion_data.joint_pos, motion_data.joint_vel],
@@ -720,7 +806,32 @@ class G1MotionTrackingEnv(G1BaseEnv):
         actor_terms.append(actor_anchor_ori_b)
         if not noise_cfg.enable_zero_linvel:
             actor_terms.append(noisy_linvel)
-        actor_terms.extend([noisy_gyro, noisy_joint_pos_rel, noisy_dof_vel, last_actions])
+
+        # --- Proprio history maintenance ---
+        # Update buffer BEFORE reading: reset → fill all H slots with current;
+        # step → push current at end, drop oldest. After this, the buffer's
+        # newest entry equals the current step (matches deploy ObservationManager
+        # which calls term.add(current) inside compute_group before reading).
+        if self._hist_buf is not None:
+            hist_components = self._hist_components(
+                noisy_gyro, noisy_joint_pos_rel, noisy_dof_vel, last_actions,
+            )
+            if is_reset:
+                self._fill_obs_history(env_ids, hist_components)
+            else:
+                self._push_obs_history(env_ids, hist_components)
+            # Read oldest-first history per term; flatten (n_e, H, D) -> (n_e, H*D).
+            # Order MUST be (gyro, joint_pos_rel, dof_vel, last_actions) to
+            # match deploy_config.yaml obs_layout and the C++ obs_layout enum.
+            sel = slice(None) if env_ids is None else env_ids
+            for key in ("gyro", "joint_pos_rel", "dof_vel", "last_actions"):
+                h_view = self._hist_buf[key][sel]   # (n_e, H, D)
+                actor_terms.append(h_view.reshape(h_view.shape[0], -1))
+        else:
+            # H=1 back-compat: single-step proprio, exactly the pre-history code.
+            actor_terms.extend(
+                [noisy_gyro, noisy_joint_pos_rel, noisy_dof_vel, last_actions]
+            )
         actor_obs = np.concatenate(actor_terms, axis=1, dtype=get_global_dtype())
 
         # Robot body positions in robot anchor frame (critic-only privileged) — vectorized

@@ -4,6 +4,23 @@
 Reads g1.xml + scene_flat.xml + tracking.py defaults to emit a single yaml
 that the deploy framework (~/deploy_ws/unitree_rl_lab/.../State_WBT) can load
 to drive the actor at runtime.
+
+This file is the SINGLE SOURCE OF TRUTH for the actor obs schema:
+  * Training side (tracking.py) assembles obs in the order documented here.
+  * Deploy side (State_WBT.cpp + ObservationManager) reads obs_layout from
+    this yaml and assembles in matching order with per-term history buffers.
+  * Alignment test (tests/test_obs_alignment_g1_wbt.py) verifies both code
+    paths produce byte-identical obs from the same inputs.
+
+obs_layout schema v2 (per-term history_length):
+  Each entry: {name, dim, history_length, source}
+  * Reference terms (command_*, motion_anchor_*) use history_length=1
+    (single-step, refs come fresh from the motion clip every tick).
+  * Proprio terms (gyro, joint_pos_rel, dof_vel, last_actions) carry
+    history_length=H (5 for the deploy profile), flattened oldest-first.
+  * Deploy framework reads via use_gym_history=false (group-by-term mode),
+    so each term independently flattens its full history → total obs_dim is
+    the sum of dim * history_length over all entries.
 """
 from __future__ import annotations
 
@@ -46,16 +63,76 @@ CTRL_DT = 0.02
 KEYFRAME_NAME = "stand"
 ROOT_QPOS_DIM = 7  # free joint: xyz + quat(wxyz)
 
+# Default obs history length — matches mujoco_deploy.yaml's
+# `noise_config.obs_history_length`. Override via --obs-history-length when
+# exporting for other training profiles (e.g. mujoco.yaml uses 1).
+DEFAULT_OBS_HISTORY_LENGTH = 5
+
 
 def _round_list(arr, ndigits=6):
     return [round(float(v), ndigits) for v in arr]
 
 
+def _build_obs_layout(num_action: int, hist_len: int,
+                      enable_zero_anchor_pos: bool, enable_zero_linvel: bool):
+    """Build obs_layout in the exact order tracking.py:_compute_obs assembles.
+
+    Returns (layout_list, total_obs_dim).
+    Order = single-step refs first, then per-term proprio history blocks,
+    matching the training-side actor obs concatenation order.
+    """
+    layout = [
+        # ---- single-step reference terms (history_length=1) ----
+        {"name": "command_joint_pos", "dim": num_action, "history_length": 1,
+         "source": "motion_ref_frame.joint_pos"},
+        {"name": "command_joint_vel", "dim": num_action, "history_length": 1,
+         "source": "motion_ref_frame.joint_vel"},
+    ]
+    if not enable_zero_anchor_pos:
+        layout.append({
+            "name": "motion_anchor_pos_b", "dim": 3, "history_length": 1,
+            "source": "subtract_frame(robot_anchor_w, motion_anchor_w).pos",
+        })
+    layout.append({
+        "name": "motion_anchor_ori_b", "dim": 6, "history_length": 1,
+        "source": "rotation_matrix(subtract_frame(...).quat)[:, :2].flatten()",
+    })
+    if not enable_zero_linvel:
+        layout.append({
+            "name": "base_lin_vel", "dim": 3, "history_length": 1,
+            "source": "imu.local_linvel (state-estimated)",
+        })
+    # ---- proprio terms with H-step oldest-first history ----
+    layout.extend([
+        {"name": "gyro", "dim": 3, "history_length": hist_len,
+         "source": "imu.gyroscope"},
+        {"name": "joint_pos_rel", "dim": num_action, "history_length": hist_len,
+         "source": "dof_pos - default_angles"},
+        {"name": "dof_vel", "dim": num_action, "history_length": hist_len,
+         "source": "dof_vel"},
+        {"name": "last_actions", "dim": num_action, "history_length": hist_len,
+         "source": "previous raw actor output"},
+    ])
+    total = sum(seg["dim"] * seg["history_length"] for seg in layout)
+    return layout, total
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene", type=Path, default=DEFAULT_SCENE,
                     help="MuJoCo scene file containing the 'stand' keyframe.")
     ap.add_argument("--output", "-o", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--obs-history-length", type=int, default=DEFAULT_OBS_HISTORY_LENGTH,
+                    help="Proprio history length H. Must match training-side "
+                         "noise_config.obs_history_length. Default 5 = current "
+                         "mujoco_deploy.yaml. Set 1 for the legacy 154-d schema.")
+    ap.add_argument("--enable-zero-anchor-pos", action="store_true", default=True,
+                    help="Drop motion_anchor_pos_b from actor obs (mjlab parity). "
+                         "Matches mujoco_deploy.yaml's noise_config flag.")
+    ap.add_argument("--enable-zero-linvel", action="store_true", default=True,
+                    help="Drop base_lin_vel from actor obs (mjlab parity). "
+                         "Matches mujoco_deploy.yaml's noise_config flag.")
     args = ap.parse_args()
 
     if not args.scene.exists():
@@ -120,15 +197,33 @@ def main():
         tracked_body_ids.append(int(bid))
     anchor_body_idx_in_tracked = TRACKED_BODY_NAMES.index(ANCHOR_BODY_NAME)
 
+    # Build the obs layout (single source of truth for actor obs assembly).
+    obs_layout, obs_dim = _build_obs_layout(
+        num_action=model.nu,
+        hist_len=args.obs_history_length,
+        enable_zero_anchor_pos=args.enable_zero_anchor_pos,
+        enable_zero_linvel=args.enable_zero_linvel,
+    )
+
     cfg = {
         # ---- meta ----
-        # 154 = command(58) + motion_anchor_ori_b(6) + base_ang_vel(3)
-        #       + joint_pos_rel(29) + joint_vel(29) + last_actions(29).
-        # Aligns with the deploy-profile training run (mujoco_deploy.yaml)
-        # which drops motion_anchor_pos_b and base_lin_vel from actor obs
-        # to match Unitree's verified mjlab "No-State-Estimation" deploy yaml.
-        "obs_dim": 154,
-        "action_dim": 29,
+        # obs_dim = sum over obs_layout of dim * history_length.
+        # For the deploy profile (H=5, both zero flags ON) this is:
+        #   command_joint_pos(29*1) + command_joint_vel(29*1)
+        #   + motion_anchor_ori_b(6*1) + gyro(3*5)
+        #   + joint_pos_rel(29*5) + dof_vel(29*5) + last_actions(29*5) = 514
+        # Aligns with deploy-profile training run (mujoco_deploy.yaml) which
+        # drops motion_anchor_pos_b and base_lin_vel from actor obs to match
+        # Unitree's verified mjlab "No-State-Estimation" deploy yaml and
+        # adds BeyondMimic-style proprio history (default H=5).
+        "obs_dim": obs_dim,
+        "obs_history_length": args.obs_history_length,
+        # Deploy ObservationManager mode. False = group-by-term (each term's
+        # full history flattened oldest-first, then concat across terms).
+        # True = group-by-time-step (legacy gym style). Training side uses
+        # the false convention, so MUST stay false here for byte alignment.
+        "use_gym_history": False,
+        "action_dim": int(model.nu),
         "ctrl_dt": CTRL_DT,
         "action_scale": ACTION_SCALE,
         "ema_alpha": EMA_ALPHA,
@@ -164,19 +259,12 @@ def main():
             "joint_pos_encoder_bias_per_episode": 0.01,
         },
 
-        # ---- obs layout (for State_WBT to assemble correctly).
-        # NOTE: motion_anchor_pos_b and base_lin_vel are intentionally absent
-        # because the deploy-profile training run masks them out — there is
-        # no torso-pose estimator and no base-linvel sensor on G1. ----
-        "obs_layout": [
-            {"name": "command_joint_pos", "dim": 29, "source": "motion_ref_frame.joint_pos"},
-            {"name": "command_joint_vel", "dim": 29, "source": "motion_ref_frame.joint_vel"},
-            {"name": "motion_anchor_ori_b", "dim": 6, "source": "rotation_matrix(subtract_frame(...).quat)[:, :2].flatten()"},
-            {"name": "gyro", "dim": 3, "source": "imu.gyroscope"},
-            {"name": "joint_pos_rel", "dim": 29, "source": "dof_pos - default_angles"},
-            {"name": "dof_vel", "dim": 29, "source": "dof_vel"},
-            {"name": "last_actions", "dim": 29, "source": "previous raw actor output"},
-        ],
+        # ---- obs layout (SINGLE SOURCE OF TRUTH for both ends) ----
+        # Each entry: name, dim (per-step), history_length, source.
+        # Total obs_dim = sum(dim * history_length).
+        # Order MUST match tracking.py:_compute_obs assembly order.
+        # State_WBT.cpp:build_env_cfg translates names via its alias table.
+        "obs_layout": obs_layout,
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +274,11 @@ def main():
     print(f"Wrote {args.output} ({args.output.stat().st_size} bytes)")
     print(f"  joints: {model.nu}, tracked bodies: {len(TRACKED_BODY_NAMES)}, "
           f"anchor='{ANCHOR_BODY_NAME}' (idx_in_tracked={anchor_body_idx_in_tracked})")
+    print(f"  obs_history_length={args.obs_history_length}, total obs_dim={obs_dim}")
+    print(f"  obs_layout segments:")
+    for seg in obs_layout:
+        print(f"    {seg['name']:24s} dim={seg['dim']:3d}  H={seg['history_length']:1d}  "
+              f"contrib={seg['dim'] * seg['history_length']}")
     print(f"  default_angles[:6] = {_round_list(default_angles[:6], 3)}")
     print(f"  kp[:3] = {_round_list(kp[:3], 3)}, kd[:3] = {_round_list(kv[:3], 3)}")
 

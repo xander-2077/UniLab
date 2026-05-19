@@ -170,6 +170,15 @@ env:
     # Anchor orientation noise (mjlab Unoise(±0.05) on the 6-d rotation cols).
     enable_anchor_ori_noise: true
     scale_anchor_ori: 0.05
+    # Stage 9 (P3.2): 5-step proprio history (BeyondMimic / MOSAIC parity).
+    # Actor obs goes 154 -> 514 d. Refs (command_*, anchor_ori_b) stay single-
+    # step; gyro / joint_pos_rel / dof_vel / last_actions get 5-step oldest-
+    # first history. Lets the actor implicitly estimate base linear velocity
+    # (which is masked out by enable_zero_linvel) from joint deltas + IMU
+    # without requiring a deploy-side state estimator. Deploy framework
+    # ObservationManager natively supports per-term history_length (see
+    # config/policy/velocity/v0/params/deploy.yaml which already uses 5).
+    obs_history_length: 5
   # Domain randomization switches — aligned with Domain_Rand fields available
   # to G1MotionTrackingEnv (see src/unilab/envs/motion_tracking/g1/tracking.py).
   domain_rand:

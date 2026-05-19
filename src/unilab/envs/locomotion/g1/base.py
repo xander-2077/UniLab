@@ -28,6 +28,12 @@ class NoiseConfig:
     # When True, add per-step uniform noise to ``motion_anchor_ori_b`` (actor only).
     enable_anchor_ori_noise: bool = False
     scale_anchor_ori: float = 0.05
+    # When > 1, actor proprio terms (gyro, joint_pos_rel, dof_vel, last_actions)
+    # are concatenated as an oldest-first H-step history block. Reference terms
+    # (command_*, motion_anchor_*) stay single-step. Critic stays single-step.
+    # Default 1 = back-compat (no history); enabled per-task via yaml.
+    # Matches deploy-side ObservationManager group-by-term mode (use_gym_history=false).
+    obs_history_length: int = 1
 
 
 @dataclass

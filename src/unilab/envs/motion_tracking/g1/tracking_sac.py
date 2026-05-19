@@ -55,6 +55,8 @@ class G1MotionTrackingSACEnv(G1MotionTrackingEnv):
         dof_vel: np.ndarray,
         robot_body_pos_w: np.ndarray,
         robot_body_quat_w: np.ndarray,
+        env_ids: np.ndarray | None = None,
+        is_reset: bool = False,
     ) -> dict[str, np.ndarray]:
         obs = super()._compute_obs(  # pyright: ignore[reportAttributeAccessIssue]
             info,
@@ -65,6 +67,8 @@ class G1MotionTrackingSACEnv(G1MotionTrackingEnv):
             dof_vel,
             robot_body_pos_w,
             robot_body_quat_w,
+            env_ids=env_ids,
+            is_reset=is_reset,
         )
         # Append base_lin_vel to critic observations.
         obs["critic"] = np.concatenate([obs["critic"], linvel], axis=1, dtype=get_global_dtype())  # type: ignore[call-overload]
