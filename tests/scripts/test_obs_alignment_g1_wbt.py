@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SIM_PROTOTYPE = REPO_ROOT / "scripts" / "deploy" / "sim_prototype.py"
 
 
