@@ -149,16 +149,17 @@ class Go2HandStandTask(Go2BaseEnv):
         # Initialize rear leg (RL, RR) phases with alternating values for gait
         self.feet_phase[:, 2] = 0.0  # RL starts at 0
         self.feet_phase[:, 3] = 0.5  # RR starts at 0.5 (alternating)
-        self.gait_frequency = 2  # Slower stepping: 2 seconds per cycle
+        self.gait_frequency = 5  # Slower stepping: 2 seconds per cycle
         self.feet_force = np.zeros((num_envs, len(cfg.sensor.feet_force), 1), dtype=np.float32)
         # Track air time for stepping reward
         self._feet_air_time = np.zeros((num_envs, len(cfg.sensor.feet_force)), dtype=np.float32)
         self._last_contacts = np.zeros((num_envs, 2), dtype=bool)
         self.feet_pos = np.zeros((num_envs, len(cfg.sensor.feet_pos), 3), dtype=np.float32)
         self.torso_height = np.zeros((num_envs,), dtype=np.float32)
-        self._z_des = 0.55
+        self._z_des = 0.53
         self._desired_gravity = np.array([-1, 0, 0])
         self.feet_geom_names = [0, 1]
+        self.feet_geom_stand_names = [2, 3]
         self._joint_ids = [0, 1, 2, 3, 4, 5, 6, 9]
         self._tar_ids = [6, 7, 8, 9, 10, 11]
         self.target_angle = np.array([0, 1.82, -1.16, 0.0, 1.82, -1.16])
@@ -172,13 +173,17 @@ class Go2HandStandTask(Go2BaseEnv):
         self._reward_fns: dict[str, Any] = {
             "height": self._reward_height,
             "contact": self._cost_contact,
+            # "contact_stand": self._cost_contact_stand,
             "oritentation": self._reward_orientation,
             "pose": self._cost_pose,
             "penalty_contact": self._reward_penalty_contact,
             "action_rate": rewards.action_rate,
             "tar": self._reward_tar,
-            "feet_air_time": self._reward_feet_air_time,
+            "swing": self._reward_swing_feet_z,
+            # "feet_air_time": self._reward_feet_air_time,
+            # "feet_on_air":self._reward_handstand_feet_on_air,
             "world_z_vel_penalty": self._reward_world_z_vel_penalty,
+            "linvel_penalty": self._reward_linvel_penalty,
         }
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
@@ -211,7 +216,7 @@ class Go2HandStandTask(Go2BaseEnv):
             self.feet_phase[~height_mask, i] = 0.0
 
         # Update feet air time for stepping reward (only rear legs)
-        contact = self.feet_force[:, [2, 3], 0] > 1.0
+        contact = self.feet_force[:, [2, 3], 0] > 0.2
         contact_filt = np.logical_or(contact, self._last_contacts)
         self._last_contacts = contact
         # Increment air time
@@ -261,11 +266,11 @@ class Go2HandStandTask(Go2BaseEnv):
         # command = info["commands"]
         last_actions = info.get("current_actions", np.zeros_like(diff))
         obs = np.concatenate(
-            [gyro, -gravity, diff, dof_vel, last_actions],
+            [gyro * 0.25, -gravity, diff, dof_vel * 0.05, last_actions],
             axis=1,
             dtype=get_global_dtype(),
         )
-        critic = np.concatenate([obs, linvel, height], axis=1, dtype=get_global_dtype())
+        critic = np.concatenate([obs, linvel * 2, height * 5], axis=1, dtype=get_global_dtype())
         return {"obs": obs, "critic": critic}
 
     # state = jp.hstack([
@@ -340,7 +345,9 @@ class Go2HandStandTask(Go2BaseEnv):
             arr = self._backend.get_sensor_data(name)
             contact_arrays.append(arr)
         result = np.concatenate(contact_arrays, axis=1)
-        return np.asarray(np.any(result, axis=1))
+        # return np.asarray(np.any(result, axis=1))
+        # print(np.asarray(np.sum(result, axis=1)))
+        return np.asarray(np.sum(result, axis=1))
 
     def _reward_stand_contact(self, ctx: RewardContext) -> np.ndarray:
         # res = np.zeros(self._num_envs, dtype=np.float32)
@@ -365,15 +372,11 @@ class Go2HandStandTask(Go2BaseEnv):
 
     def _reward_swing_feet_z(self, ctx: RewardContext) -> np.ndarray:
         is_swing = self.feet_phase >= 0.6
-        height_mask = self.torso_height >= self._z_des * 0.8
-        target_height = 0.1
+        # height_mask = self.torso_height >= self._z_des * 0.8
+        target_height = 0.02
         height_error = np.square(self.feet_pos[:, [2, 3], 2] - target_height)
-        swing_rew = np.exp(-height_error / 0.01) * is_swing[:, 2:]
-        reward: np.ndarray = (
-            np.sum(swing_rew, axis=1)
-            / len(self._cfg.sensor.feet_pos)
-            * height_mask.astype(np.float32)
-        )
+        swing_rew = np.exp(-height_error / 0.1) * is_swing[:, 2:]
+        reward: np.ndarray = np.sum(swing_rew, axis=1) / len(self._cfg.sensor.feet_pos)
         return reward
 
     def _reward_height(self, ctx: RewardContext) -> np.ndarray:
@@ -390,6 +393,10 @@ class Go2HandStandTask(Go2BaseEnv):
 
     def _cost_contact(self, ctx: RewardContext) -> np.ndarray:
         feet_contact = self.feet_force[:, self.feet_geom_names, :]
+        return np.asarray(np.any(feet_contact, axis=1).squeeze())
+
+    def _cost_contact_stand(self, ctx: RewardContext) -> np.ndarray:
+        feet_contact = self.feet_force[:, self.feet_geom_stand_names, :]
         return np.asarray(np.any(feet_contact, axis=1).squeeze())
 
     # def _cost_pose(self, ctx: RewardContext) -> np.ndarray:
@@ -417,12 +424,27 @@ class Go2HandStandTask(Go2BaseEnv):
         # Target air time - reward for staying in air longer than this
         target_air_time = 0.2
         # First contact detection: air_time > 0 and currently in contact
-        contact = self.feet_force[:, [2, 3], 0] > 1.0
+        contact = self.feet_force[:, [2, 3], 0] > 0.2
         first_contact = (self._feet_air_time[:, [2, 3]] > 0.0) & contact
         # Reward: (actual_air_time - target) for feet making first contact
         rew = (self._feet_air_time[:, [2, 3]] - target_air_time) * first_contact
         # Sum over rear legs and apply height mask
         return np.sum(rew, axis=1) * height_mask
+
+    def _reward_linvel_penalty(self, ctx: RewardContext) -> np.ndarray:
+        """Penalize linear velocity after standing up to encourage stillness."""
+        height_mask = self.torso_height >= self._z_des * 0.8
+        world_linvel = self._backend.get_base_lin_vel()
+        return np.sum(np.square(world_linvel), axis=1) * height_mask
+
+    # def _reward_linvel_penalty(self, ctx: RewardContext) -> np.ndarray:
+    #     """Reward tracking zero horizontal velocity after standing up."""
+    #     height_mask = (self.torso_height >= self._z_des * 0.8).astype(np.float32)
+    #     # Handstand: body z → world -x, body y → world y
+    #     vel = self._backend.get_base_lin_vel()[:, 0:2]
+    #     x_error = np.square(vel[:, 0])
+    #     y_error = np.square(vel[:, 1])
+    #     return np.exp(-(x_error + y_error) / 0.25) * height_mask
 
     def _reward_world_z_vel_penalty(self, ctx: RewardContext) -> np.ndarray:
         """Penalize vertical velocity after standing up to prevent bouncing."""
@@ -435,3 +457,14 @@ class Go2HandStandTask(Go2BaseEnv):
 
     # def _cost_pose(self, qpos: jax.Array) -> jax.Array:
     # return jp.sum(jp.square(qpos[self._joint_ids] - self._joint_pose))
+    def _reward_handstand_feet_on_air(self, ctx: RewardContext) -> np.ndarray:
+        """
+        脚部在空奖励：
+        1. 使用 self.contact_forces 判断足部是否接触地面（通过预先设置的阈值）。
+        2. 如果所有足部都没有接触地面，则奖励1，否则奖励为0（或取平均）。
+        """
+
+        # feet_force shape: (num_envs, 4, 1) — scalar contact per foot
+        contact = self.feet_force[:, [2, 3], 0] > 0.1
+        reward = (~contact).astype(np.float32).prod(axis=1)
+        return reward

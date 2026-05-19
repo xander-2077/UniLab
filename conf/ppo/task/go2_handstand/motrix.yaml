@@ -17,14 +17,18 @@ algo:
 reward:
   scales:
     contact: -0.5
+    # contact_stand: -0.2
     height: 1.0
     oritentation: 1.0
     pose: -0.3
-    penalty_contact: -0.2
+    penalty_contact: -0.5
     action_rate: -0.01
     tar: 0.3
     feet_air_time: 1.0
+    feet_on_air: 0.4
     world_z_vel_penalty: -1.0
+    linvel_penalty: -1.0
+    swing: 4
   tracking_sigma: 0.25
   base_height_target: 0.3
 env:
