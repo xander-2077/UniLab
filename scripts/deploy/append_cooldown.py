@@ -210,6 +210,15 @@ def main() -> None:
                     help="deploy_config.yaml (for default_angles, tracked ids).")
     ap.add_argument("--scene", type=Path, default=DEFAULT_SCENE,
                     help="MuJoCo XML with 'stand' keyframe (for FixStand FK).")
+    ap.add_argument("--cut-frame", type=int, default=None,
+                    help="If set, truncate the input bin so that frame "
+                         "CUT_FRAME becomes the new last frame (inclusive). "
+                         "Frames after that are dropped, and the cooldown ramps "
+                         "from this frame to default. Use this when the dance's "
+                         "actual last frame has too much momentum for any post-"
+                         "hoc interpolation to stabilize. Find a low-energy "
+                         "frame (low joint vel, near-upright torso, near-zero "
+                         "pelvis vertical vel) and cut there.")
     ap.add_argument("--cooldown-sec", type=float, default=DEFAULT_COOLDOWN_SEC,
                     help="Length of Hermite deceleration ramp [seconds]. "
                          "Lowers joint vel from orig.jv[-1] to 0 and joint pos "
@@ -234,6 +243,26 @@ def main() -> None:
         raise SystemExit(f"J mismatch: bin J={J}, default_angles len={len(default_angles)}")
     if B != len(tracked_ids):
         raise SystemExit(f"B mismatch: bin B={B}, tracked_body_mujoco_ids len={len(tracked_ids)}")
+
+    if args.cut_frame is not None:
+        cf = int(args.cut_frame)
+        if cf < 1 or cf >= orig["nf"]:
+            raise SystemExit(f"cut-frame={cf} out of range [1, {orig['nf']-1}]")
+        # Keep frames [0, cf] (cf becomes the new last frame, inclusive).
+        keep = cf + 1
+        print(f"Truncating input: keep frames [0, {cf}]  "
+              f"({orig['nf']} -> {keep} frames, {orig['nf']/fps:.2f}s -> {keep/fps:.2f}s)",
+              file=sys.stderr)
+        for k in ("jp", "jv", "bp", "bq", "bv", "bav"):
+            orig[k] = orig[k][:keep]
+        orig["nf"] = keep
+        # Report cut-point energy so the user sees what cool-down starts from.
+        a = cfg.get("anchor_body_idx_in_tracked", 7)
+        jv_l2 = float(np.linalg.norm(orig["jv"][-1]))
+        jp_dev = float(np.abs(orig["jp"][-1] - default_angles).max())
+        bv_z = float(abs(orig["bv"][-1, a, 2]))
+        print(f"  cut-point energy: |jv|={jv_l2:.2f} rad/s  jp_dev={jp_dev:.3f} rad  "
+              f"|bv_z|={bv_z:.3f} m/s", file=sys.stderr)
 
     dt = 1.0 / fps
     N = int(round(args.cooldown_sec * fps))
