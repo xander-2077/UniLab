@@ -7,7 +7,7 @@ import numpy as np
 
 from unilab.base import registry
 from unilab.base.np_env import NpEnvState
-from unilab.dr import DomainRandomizationManager, ResetPlan, ResetRandomizationPayload
+from unilab.dr import ResetPlan, ResetRandomizationPayload
 from unilab.dtype_config import get_global_dtype
 from unilab.envs.common.rotation import np_quat_apply, np_quat_apply_inverse
 from unilab.envs.locomotion.common import rewards
@@ -114,6 +114,16 @@ class Go2FootStandCfg(Go2HandStandCfg):
 
 
 class Go2FootStandDomainRandomizationProvider(Go2HandStandDomainRandomizationProvider):
+    def _get_reset_randomization_baselines(
+        self, env: Any
+    ) -> tuple[np.ndarray | None, np.ndarray | None, int | None, np.ndarray | None]:
+        return (
+            env._base_body_mass,
+            env._base_geom_friction,
+            env._floor_geom_id,
+            env._base_dof_armature,
+        )
+
     def build_reset_plan(self, env: Any, env_ids: np.ndarray) -> ResetPlan:
         plan = super().build_reset_plan(env, env_ids)
         qpos = np.asarray(plan.qpos, dtype=get_global_dtype()).copy()
@@ -235,9 +245,10 @@ class Go2FootStandTask(Go2HandStandTask):
         self._base_body_mass = self._backend.get_body_mass()
         self._base_body_ipos = self._backend.get_body_ipos()
         self._base_dof_armature = self._backend.get_dof_armature()
-        self._dr_manager = DomainRandomizationManager(
-            self, Go2FootStandDomainRandomizationProvider()
-        )
+        self._init_domain_randomization(Go2FootStandDomainRandomizationProvider())
+
+    def _init_task_domain_randomization(self) -> None:
+        pass
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
