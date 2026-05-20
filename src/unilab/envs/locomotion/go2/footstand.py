@@ -27,6 +27,14 @@ _BODY_FORWARD = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 _FOOTSTAND_FRAME_OBS_DIM = 45
 _FOOTSTAND_PRIVILEGED_TAIL_DIM = 49
 _FOOTSTAND_MIN_OBS_HISTORY_LEN = 15
+_FOOTSTAND_FRONT_FEET = [0, 1]
+_FOOTSTAND_REAR_FEET = [2, 3]
+_FOOTSTAND_FRONT_LEG_IDS = [0, 1, 2, 3, 4, 5]
+_FOOTSTAND_REAR_LEG_IDS = [6, 7, 8, 9, 10, 11]
+_FOOTSTAND_FRONT_LEG_TARGET = np.array([0.0, 1.82, -1.16, 0.0, 1.82, -1.16])
+_FOOTSTAND_CONTACT_THRESHOLD = 0.1
+_FOOTSTAND_STAND_HEIGHT_FRACTION = 0.8
+_FOOTSTAND_STAND_ORIENTATION_THRESHOLD = 0.5
 
 
 @dataclass
@@ -158,9 +166,7 @@ class Go2FootStandDomainRandomizationProvider(Go2HandStandDomainRandomizationPro
             base_mass_delta=base.base_mass_delta,
             base_com_offset=base.base_com_offset,
             gravity=base.gravity,
-            body_iquat=override.body_iquat
-            if override.body_iquat is not None
-            else base.body_iquat,
+            body_iquat=override.body_iquat if override.body_iquat is not None else base.body_iquat,
             body_inertia=override.body_inertia
             if override.body_inertia is not None
             else base.body_inertia,
@@ -226,10 +232,7 @@ class Go2FootStandTask(Go2HandStandTask):
         super().__init__(cfg, num_envs=num_envs, backend_type=backend_type)
         self._z_des = 0.53
         self._desired_forward_vec = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        self.feet_geom_names = [2, 3]
-        self._joint_ids = [0, 1, 2, 3, 4, 5]
-        self._tar_ids = [6, 7, 8, 9, 10, 11]
-        self.target_angle = np.array([0, 1.82, -1.16, 0.0, 1.82, -1.16])
+        self._init_footstand_pose_targets()
         self._init_soft_joint_limits()
         self._init_motor_target_limits()
         self._last_dof_vel_for_acc = np.zeros((num_envs, self._num_action), dtype=np.float32)
@@ -249,6 +252,12 @@ class Go2FootStandTask(Go2HandStandTask):
 
     def _init_task_domain_randomization(self) -> None:
         pass
+
+    def _init_footstand_pose_targets(self) -> None:
+        self.feet_geom_names = list(_FOOTSTAND_FRONT_FEET)
+        self._joint_ids = list(_FOOTSTAND_REAR_LEG_IDS)
+        self._tar_ids = list(_FOOTSTAND_FRONT_LEG_IDS)
+        self.target_angle = np.asarray(_FOOTSTAND_FRONT_LEG_TARGET, dtype=get_global_dtype())
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
@@ -298,9 +307,7 @@ class Go2FootStandTask(Go2HandStandTask):
             body_ipos = np.broadcast_to(
                 self._base_body_ipos, (num_reset, *self._base_body_ipos.shape)
             ).copy()
-            body_ipos[:, self._base_body_id, :] += np.random.uniform(
-                low, high, size=(num_reset, 3)
-            )
+            body_ipos[:, self._base_body_id, :] += np.random.uniform(low, high, size=(num_reset, 3))
             payload.body_ipos = body_ipos
 
         if domain_rand.randomize_dof_armature:
@@ -328,6 +335,9 @@ class Go2FootStandTask(Go2HandStandTask):
             "pose": self._cost_pose,
             "penalty_contact": self._reward_penalty_contact,
             "tar": self._reward_tar,
+            "rear_feet_contact": self._reward_rear_feet_contact,
+            "front_leg_motion": self._cost_front_leg_motion,
+            "upright_stability": self._cost_upright_stability,
             "stay_still": self._cost_stay_still,
             "energy": rewards.energy,
             "dof_acc": rewards.dof_acc,
@@ -341,16 +351,25 @@ class Go2FootStandTask(Go2HandStandTask):
 
     def _get_local_gravity(self) -> np.ndarray:
         gravity = np.broadcast_to(_WORLD_GRAVITY, (self._num_envs, 3))
-        return np.asarray(np_quat_apply_inverse(self._backend.get_base_quat(), gravity), dtype=get_global_dtype())
+        return np.asarray(
+            np_quat_apply_inverse(self._backend.get_base_quat(), gravity), dtype=get_global_dtype()
+        )
 
     def _get_body_forward(self) -> np.ndarray:
         forward = np.broadcast_to(_BODY_FORWARD, (self._num_envs, 3))
-        return np.asarray(np_quat_apply(self._backend.get_base_quat(), forward), dtype=get_global_dtype())
+        return np.asarray(
+            np_quat_apply(self._backend.get_base_quat(), forward), dtype=get_global_dtype()
+        )
 
     def _reward_height(self, ctx: RewardContext) -> np.ndarray:
         del ctx
         error = np.abs(self._z_des - self.torso_height)
         return np.asarray(np.exp(-error / 0.1), dtype=get_global_dtype())
+
+    def _standing_mask(self) -> np.ndarray:
+        height_ready = self.torso_height >= self._z_des * _FOOTSTAND_STAND_HEIGHT_FRACTION
+        orientation_ready = self._orientation_score() >= _FOOTSTAND_STAND_ORIENTATION_THRESHOLD
+        return np.asarray(height_ready & orientation_ready, dtype=get_global_dtype())
 
     def apply_action(self, actions: np.ndarray, state: NpEnvState) -> np.ndarray:
         clip_actions = float(getattr(self._cfg.control_config, "clip_actions", np.inf))
@@ -568,9 +587,7 @@ class Go2FootStandTask(Go2HandStandTask):
     def _init_motor_target_limits(self) -> None:
         joint_range = self._backend.get_joint_range()
         if joint_range is None:
-            self._target_lowers = np.full(
-                (self._num_action,), -np.inf, dtype=get_global_dtype()
-            )
+            self._target_lowers = np.full((self._num_action,), -np.inf, dtype=get_global_dtype())
             self._target_uppers = np.full((self._num_action,), np.inf, dtype=get_global_dtype())
             return
 
@@ -633,5 +650,23 @@ class Go2FootStandTask(Go2HandStandTask):
 
     def _cost_contact(self, ctx: RewardContext) -> np.ndarray:
         del ctx
-        feet_contact = self.feet_force[:, self.feet_geom_names, 0] > 1.0
+        feet_contact = self.feet_force[:, self.feet_geom_names, 0] > _FOOTSTAND_CONTACT_THRESHOLD
         return np.asarray(np.any(feet_contact, axis=1), dtype=get_global_dtype())
+
+    def _reward_rear_feet_contact(self, ctx: RewardContext) -> np.ndarray:
+        del ctx
+        rear_contact = self.feet_force[:, _FOOTSTAND_REAR_FEET, 0] > _FOOTSTAND_CONTACT_THRESHOLD
+        return np.asarray(np.mean(rear_contact, axis=1), dtype=get_global_dtype())
+
+    def _cost_front_leg_motion(self, ctx: RewardContext) -> np.ndarray:
+        assert ctx.dof_vel is not None
+        front_leg_vel = ctx.dof_vel[:, _FOOTSTAND_FRONT_LEG_IDS]
+        cost = np.mean(np.square(front_leg_vel), axis=1)
+        return np.asarray(cost * self._standing_mask(), dtype=get_global_dtype())
+
+    def _cost_upright_stability(self, ctx: RewardContext) -> np.ndarray:
+        del ctx
+        linvel = self._backend.get_base_lin_vel()
+        angvel = self._backend.get_base_ang_vel()
+        cost = np.sum(np.square(linvel), axis=1) + 0.25 * np.sum(np.square(angvel), axis=1)
+        return np.asarray(cost * self._standing_mask(), dtype=get_global_dtype())
