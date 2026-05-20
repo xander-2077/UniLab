@@ -40,6 +40,17 @@ def replay_buffer_ready_for_learning(
     )
 
 
+def build_reward_comparison_metrics(
+    reward_history: deque,
+    smoothed_reward: float,
+) -> dict[str, float]:
+    """Return the latest collector-side 100-episode mean for reward comparison."""
+    del smoothed_reward
+    if not reward_history:
+        return {}
+    return {"mean_ep100": float(reward_history[-1])}
+
+
 class OffPolicyRunner(AsyncRunner):
     """Unified runner for SAC and TD3."""
 
@@ -288,8 +299,6 @@ class OffPolicyRunner(AsyncRunner):
         write_read_ema = 0.0
         reward_stats_ptr = 0
         train_start_threshold = self.train_start_threshold
-        startup_wait_time = 0.0
-        have_startup_wait_time = False
 
         training_e2e_start_ns = time.perf_counter_ns() if trace_recorder else 0
 
@@ -403,9 +412,6 @@ class OffPolicyRunner(AsyncRunner):
                 logger,
                 trace_recorder,
             )
-            if not have_startup_wait_time:
-                startup_wait_time = wait_time
-                have_startup_wait_time = True
             _reward_stats_ns = time.perf_counter_ns() if trace_recorder else 0
             reward_stats_ptr = self._update_reward_stats_from_replay(
                 replay_buffer,
@@ -553,13 +559,13 @@ class OffPolicyRunner(AsyncRunner):
                 iteration=iteration,
                 metrics=avg_metrics,
                 reward=mean_reward,
+                reward_metrics=build_reward_comparison_metrics(reward_history, mean_reward),
                 reward_components=latest_reward_components,
                 train_time=train_time,
                 wait_time=wait_time,
                 learner_incremental_h2d_time=learner_incremental_h2d_time,
                 weight_sync_time=weight_sync_time,
                 extra_info={
-                    "startup_wait_time": startup_wait_time if iteration == 1 else 0.0,
                     "throughput_steps": self.num_envs * self.env_steps_per_sync,
                 },
             )

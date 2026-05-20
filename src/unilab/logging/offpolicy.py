@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections import deque
 from typing import Any
 
@@ -12,7 +11,23 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from unilab.logging.common import BaseTrainingLogger, _fmt_number, _fmt_time, _load_wandb
+from unilab.logging.common import BaseTrainingLogger, _fmt_number, _load_wandb
+
+OFFPOLICY_COLLECTOR_TIMING_ORDER = {
+    "weight_sync_ms": 0,
+    "action_select_ms": 1,
+    "env_step_ms": 2,
+    "replay_ms": 3,
+    "sync_coordination_ms": 4,
+}
+
+OFFPOLICY_COLLECTOR_TIMING_LABELS = {
+    "weight_sync_ms": "Weight Sync",
+    "action_select_ms": "Action Select",
+    "env_step_ms": "Env Step",
+    "replay_ms": "Replay",
+    "sync_coordination_ms": "Sync Coordination",
+}
 
 
 class OffPolicyLogger(BaseTrainingLogger):
@@ -65,7 +80,6 @@ class OffPolicyLogger(BaseTrainingLogger):
         self._buffer_size: int = 0
         self._buffer_target: int = 0
         self._wait_time: float = 0.0
-        self._startup_wait_time: float = 0.0
         self._learner_incremental_h2d_time: float = 0.0
         self._weight_sync_time: float = 0.0
         self._throughput_steps: int = 0
@@ -116,31 +130,22 @@ class OffPolicyLogger(BaseTrainingLogger):
     def _get_iter_pipeline_time(self) -> float:
         return self._learner_incremental_h2d_time + self._train_time + self._weight_sync_time
 
-    def _build_compact_header(self, *, include_status: bool) -> Text:
-        elapsed = time.time() - self._start_time if self._start_time else 0
-        eta = self._estimate_eta()
+    def _build_compact_header(
+        self,
+        *,
+        include_status: bool,
+        extra_fields: list[tuple[str, str]] | None = None,
+    ) -> Text:
         iter_steps_per_sec = self._get_iter_steps_per_sec()
-        fields: list[tuple[str, str]] = [
-            (f" {self.algo_name}", "bold cyan"),
-            (self.env_name, "bold white"),
-            (f"iter {self._iteration}/{self.max_iterations}", "yellow"),
-            (f"⏱ {_fmt_time(elapsed)}", "green"),
-        ]
-        if eta:
-            fields.append((f"ETA {eta}", "bold magenta"))
-        if self._mean_ep_length > 0:
-            fields.append((f"Ep Len {self._mean_ep_length:.1f}", "yellow"))
+        header_extra_fields: list[tuple[str, str]] = []
         if iter_steps_per_sec is not None:
-            fields.append((f"Steps/s {iter_steps_per_sec:,.0f}", "bold green"))
-        if include_status and self._status:
-            fields.append((self._status, "dim italic"))
-
-        header_text = Text(no_wrap=True, overflow="ellipsis")
-        for index, (text, style) in enumerate(fields):
-            if index > 0:
-                header_text.append(" | ", style="dim")
-            header_text.append(text, style=style)
-        return header_text
+            header_extra_fields.append((f"Steps/s {iter_steps_per_sec:,.0f}", "bold green"))
+        if extra_fields:
+            header_extra_fields.extend(extra_fields)
+        return super()._build_compact_header(
+            include_status=include_status,
+            extra_fields=header_extra_fields,
+        )
 
     def update_collector_timing(self, timing_ms: dict[str, float]):
         self._collector_timing.update(timing_ms)
@@ -174,6 +179,7 @@ class OffPolicyLogger(BaseTrainingLogger):
         iteration: int,
         metrics: dict[str, float] | None = None,
         reward: float | None = None,
+        reward_metrics: dict[str, float] | None = None,
         reward_components: dict[str, float] | None = None,
         train_time: float = 0.0,
         wait_time: float = 0.0,
@@ -188,10 +194,8 @@ class OffPolicyLogger(BaseTrainingLogger):
         self._weight_sync_time = weight_sync_time
         self._has_iteration_extra_info = extra_info is not None
         if extra_info:
-            self._startup_wait_time = float(extra_info.get("startup_wait_time", 0.0))
             self._throughput_steps = int(extra_info.get("throughput_steps", 0))
         else:
-            self._startup_wait_time = 0.0
             self._throughput_steps = 0
         self._iter_times.append(self._get_iter_pipeline_time())
         if metrics:
@@ -203,13 +207,21 @@ class OffPolicyLogger(BaseTrainingLogger):
         self._status = "Training"
         self._terminal_refresh_started = True
         self._refresh()
-        self._backend_log_step(iteration, metrics, reward, reward_components, train_time)
+        self._backend_log_step(
+            iteration,
+            metrics,
+            reward,
+            reward_metrics,
+            reward_components,
+            train_time,
+        )
 
     def _backend_log_step(
         self,
         iteration: int,
         metrics: dict[str, float] | None,
         reward: float | None,
+        reward_metrics: dict[str, float] | None,
         reward_components: dict[str, float] | None,
         train_time: float,
     ):
@@ -223,6 +235,9 @@ class OffPolicyLogger(BaseTrainingLogger):
                     writer.add_scalar(f"train/{key}", value, global_step)
             if reward is not None:
                 writer.add_scalar("reward/mean", reward, global_step)
+            if reward_metrics:
+                for key, value in reward_metrics.items():
+                    writer.add_scalar(f"reward/{key}", value, global_step)
             if reward_components:
                 for key, value in reward_components.items():
                     writer.add_scalar(f"reward/{key}", value, global_step)
@@ -231,10 +246,6 @@ class OffPolicyLogger(BaseTrainingLogger):
             writer.add_scalar("episode/timeout_rate", self._timeout_rate, global_step)
             writer.add_scalar("episode/terminated_rate", self._terminated_rate, global_step)
             writer.add_scalar("timing/learner_wait_ms", self._wait_time * 1000, global_step)
-            if self._has_iteration_extra_info:
-                writer.add_scalar(
-                    "timing/startup_wait_ms", self._startup_wait_time * 1000, global_step
-                )
             writer.add_scalar(
                 "timing/learner_incremental_h2d_ms",
                 self._learner_incremental_h2d_time * 1000,
@@ -262,6 +273,9 @@ class OffPolicyLogger(BaseTrainingLogger):
                     log_dict[f"train/{key}"] = value
             if reward is not None:
                 log_dict["reward/mean"] = reward
+            if reward_metrics:
+                for key, value in reward_metrics.items():
+                    log_dict[f"reward/{key}"] = value
             if reward_components:
                 for key, value in reward_components.items():
                     log_dict[f"reward/{key}"] = value
@@ -270,8 +284,6 @@ class OffPolicyLogger(BaseTrainingLogger):
             log_dict["episode/timeout_rate"] = self._timeout_rate
             log_dict["episode/terminated_rate"] = self._terminated_rate
             log_dict["timing/learner_wait_ms"] = self._wait_time * 1000
-            if self._has_iteration_extra_info:
-                log_dict["timing/startup_wait_ms"] = self._startup_wait_time * 1000
             log_dict["timing/learner_incremental_h2d_ms"] = (
                 self._learner_incremental_h2d_time * 1000
             )
@@ -361,25 +373,21 @@ class OffPolicyLogger(BaseTrainingLogger):
             ("Train", f"{self._train_time * 1000:.1f}ms"),
             ("Weight Sync", f"{self._weight_sync_time * 1000:.1f}ms"),
         ]
-        collector_order = {
-            "env_step_total_ms": 0,
-            "step_core_ms": 1,
-            "update_state_ms": 2,
-            "reset_done_ms": 3,
-            "mlp_infer_ms": 4,
-        }
         collector_items = [
-            (key, f"{value:.1f}ms")
+            (OFFPOLICY_COLLECTOR_TIMING_LABELS.get(key, key), f"{value:.1f}ms")
             for key, value in sorted(
                 self._collector_timing.items(),
-                key=lambda item: (collector_order.get(item[0], len(collector_order)), item[0]),
+                key=lambda item: (
+                    OFFPOLICY_COLLECTOR_TIMING_ORDER.get(
+                        item[0], len(OFFPOLICY_COLLECTOR_TIMING_ORDER)
+                    ),
+                    item[0],
+                ),
             )
         ]
         system_items = [
             ("Buffer", f"{self._buffer_size:,}"),
         ]
-        if self._startup_wait_time > 0:
-            system_items.append(("Startup Wait", f"{self._startup_wait_time * 1000:.1f}ms"))
         system_items.extend(
             [
                 ("Timeout Rate", f"{self._timeout_rate * 100:.1f}%"),

@@ -27,6 +27,7 @@ import torch.multiprocessing as tmp  # torch.multiprocessing for spawn
 from unilab.algos.torch.fast_sac.learner import FastSACLearner
 from unilab.algos.torch.offpolicy.runner import (
     OffPolicyRunner,
+    build_reward_comparison_metrics,
     compute_train_start_threshold,
     replay_buffer_ready_for_learning,
 )
@@ -177,8 +178,6 @@ def _learner_worker(
         latest_reward_components: dict = {}
         write_read_ema = 0.0
         last_buf_log = 0
-        startup_wait_time = 0.0
-        have_startup_wait_time = False
 
         # 7. Training loop
         for it in range(1, max_iterations + 1):
@@ -224,9 +223,6 @@ def _learner_worker(
 
             dist.barrier()
             wait_time = time.time() - wait_start if rank == 0 else 0.0
-            if rank == 0 and not have_startup_wait_time:
-                startup_wait_time = wait_time
-                have_startup_wait_time = True
 
             # --- Training: each rank independently samples a different mini-batch ---
             iter_metrics: dict = defaultdict(list)
@@ -285,13 +281,13 @@ def _learner_worker(
                         iteration=it,
                         metrics=avg_metrics,
                         reward=mean_reward,
+                        reward_metrics=build_reward_comparison_metrics(reward_history, mean_reward),
                         reward_components=latest_reward_components,
                         train_time=train_time,
                         wait_time=wait_time,
                         learner_incremental_h2d_time=learner_incremental_h2d_time,
                         weight_sync_time=weight_sync_time,
                         extra_info={
-                            "startup_wait_time": startup_wait_time if it == 1 else 0.0,
                             "throughput_steps": num_envs * env_steps_per_sync,
                         },
                     )
