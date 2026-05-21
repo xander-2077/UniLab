@@ -470,12 +470,20 @@ def test_ppo_go2_footstand_uses_sim2real_smoothing_terms():
         cfg = compose("config", overrides=["task=go2_footstand/mujoco"])
 
     assert cfg.env.energy_termination_threshold == pytest.approx(400.0)
+    assert cfg.env.control_config.action_scale == pytest.approx(0.25)
     assert cfg.env.control_config.simulate_action_latency is True
     assert cfg.env.obs_latency_steps == 0
     assert cfg.env.randomize_obs_latency is True
     assert cfg.env.obs_latency_steps_range == [0, 2]
-    assert cfg.reward.scales.energy == pytest.approx(-0.003)
-    assert cfg.reward.scales.dof_acc == pytest.approx(-2.5e-7)
+    assert cfg.algo.policy.init_noise_std == pytest.approx(0.35)
+    assert cfg.algo.algorithm.entropy_coef == pytest.approx(0.002)
+    assert cfg.reward.scales.action_rate == pytest.approx(-0.02)
+    assert cfg.reward.scales.termination == pytest.approx(-5.0)
+    assert cfg.reward.scales.front_leg_motion == pytest.approx(-0.1)
+    assert cfg.reward.scales.upright_stability == pytest.approx(-0.4)
+    assert cfg.reward.scales.stay_still == pytest.approx(-0.2)
+    assert cfg.reward.scales.energy == pytest.approx(-0.005)
+    assert cfg.reward.scales.dof_acc == pytest.approx(-5.0e-7)
     assert cfg.env.domain_rand.randomize_floor_friction is True
     assert cfg.env.domain_rand.randomize_link_mass is True
     assert cfg.env.domain_rand.randomize_torso_com is True

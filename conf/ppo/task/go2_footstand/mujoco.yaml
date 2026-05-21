@@ -10,7 +10,7 @@ env:
   obs_latency_steps_range: [0, 2]
   energy_termination_threshold: 400.0
   control_config:
-    action_scale: 0.3
+    action_scale: 0.25
     simulate_action_latency: true
   domain_rand:
     randomize_floor_friction: true
@@ -35,26 +35,26 @@ algo:
     critic:
       - critic
   policy:
-    init_noise_std: 0.5
+    init_noise_std: 0.35
   algorithm:
-    entropy_coef: 0.005
+    entropy_coef: 0.002
 reward:
   scales:
     height: 2.0
     orientation: 2.0
     contact: -1.0
-    action_rate: -0.01
-    termination: -2.0
+    action_rate: -0.02
+    termination: -5.0
     dof_pos_limits: -0.5
     torques: 0.0
     pose: -0.1
     penalty_contact: -0.2
     tar: 0.8
     rear_feet_contact: 0.5
-    front_leg_motion: -0.05
-    upright_stability: -0.2
-    stay_still: -0.1
-    energy: -0.003
-    dof_acc: -2.5e-7
+    front_leg_motion: -0.1
+    upright_stability: -0.4
+    stay_still: -0.2
+    energy: -0.005
+    dof_acc: -5.0e-7
   tracking_sigma: 0.25
   base_height_target: 0.3
