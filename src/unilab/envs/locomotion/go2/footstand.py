@@ -31,7 +31,8 @@ _FOOTSTAND_FRONT_FEET = [0, 1]
 _FOOTSTAND_REAR_FEET = [2, 3]
 _FOOTSTAND_FRONT_LEG_IDS = [0, 1, 2, 3, 4, 5]
 _FOOTSTAND_REAR_LEG_IDS = [6, 7, 8, 9, 10, 11]
-_FOOTSTAND_FRONT_LEG_TARGET = np.array([0.0, 1.82, -1.16, 0.0, 1.82, -1.16])
+# Go1 footstand keyframe front legs are ordered FR, FL; Go2 qpos order is FL, FR.
+_FOOTSTAND_FRONT_LEG_TARGET = np.array([0.0, 0.82, -1.68, 0.0, 0.82, -1.6])
 _FOOTSTAND_CONTACT_THRESHOLD = 0.1
 _FOOTSTAND_STAND_HEIGHT_FRACTION = 0.8
 _FOOTSTAND_STAND_ORIENTATION_THRESHOLD = 0.5
@@ -108,6 +109,9 @@ class FootstandSensor(JoystickSensor):
 class Go2FootStandCfg(Go2HandStandCfg):
     max_episode_seconds: float = 10.0
     obs_history_len: int = _FOOTSTAND_MIN_OBS_HISTORY_LEN
+    obs_latency_steps: int = 0
+    randomize_obs_latency: bool = False
+    obs_latency_steps_range: list[int] = field(default_factory=lambda: [0, 0])
     soft_joint_pos_limit_factor: float = 0.9
     energy_termination_threshold: float = np.inf
     termination_grace_steps: int = 100
@@ -242,6 +246,7 @@ class Go2FootStandTask(Go2HandStandTask):
             (num_envs, self._obs_history_len, _FOOTSTAND_FRAME_OBS_DIM),
             dtype=get_global_dtype(),
         )
+        self._init_obs_latency_buffers()
         self._base_geom_friction = self._backend.get_geom_friction()
         self._floor_geom_id = self._backend.get_geom_id(self._cfg.asset.ground)
         self._base_body_id = self._backend.get_body_id(self._cfg.asset.base_name)
@@ -511,6 +516,7 @@ class Go2FootStandTask(Go2HandStandTask):
             axis=1,
             dtype=get_global_dtype(),
         )
+        obs = self._apply_obs_latency(obs, env_ids=env_ids)
         obs = self._update_obs_history(obs, env_ids=env_ids)
         torques = np.asarray(info.get("torques", np.zeros_like(dof_pos)), dtype=get_global_dtype())
         critic = np.concatenate(
@@ -529,6 +535,86 @@ class Go2FootStandTask(Go2HandStandTask):
             dtype=get_global_dtype(),
         )
         return {"obs": obs, "critic": critic}
+
+    def _obs_latency_bounds(self) -> tuple[int, int]:
+        if bool(self._cfg.randomize_obs_latency):
+            values = list(self._cfg.obs_latency_steps_range)
+            if len(values) != 2:
+                raise ValueError("obs_latency_steps_range must contain exactly two values")
+            low, high = int(values[0]), int(values[1])
+        else:
+            low = high = int(self._cfg.obs_latency_steps)
+        if low < 0 or high < 0:
+            raise ValueError("obs latency steps must be non-negative")
+        if low > high:
+            raise ValueError("obs_latency_steps_range lower bound must be <= upper bound")
+        return low, high
+
+    def _init_obs_latency_buffers(self) -> None:
+        low, high = self._obs_latency_bounds()
+        self._obs_latency_min_steps = low
+        self._obs_latency_max_steps = high
+        if bool(self._cfg.randomize_obs_latency) and high > low:
+            steps = np.random.randint(low, high + 1, size=(self._num_envs,)).astype(np.int32)
+        else:
+            steps = np.full((self._num_envs,), high, dtype=np.int32)
+        self._obs_latency_steps_per_env = steps
+        self._obs_latency_frame_buffer = np.zeros(
+            (self._num_envs, high + 1, _FOOTSTAND_FRAME_OBS_DIM),
+            dtype=get_global_dtype(),
+        )
+
+    def _ensure_obs_latency_buffers(self) -> np.ndarray:
+        _, high = self._obs_latency_bounds()
+        expected_shape = (self._num_envs, high + 1, _FOOTSTAND_FRAME_OBS_DIM)
+        buffer = getattr(self, "_obs_latency_frame_buffer", None)
+        steps = getattr(self, "_obs_latency_steps_per_env", None)
+        if (
+            buffer is None
+            or buffer.shape != expected_shape
+            or steps is None
+            or steps.shape != (self._num_envs,)
+        ):
+            self._init_obs_latency_buffers()
+            buffer = self._obs_latency_frame_buffer
+        return cast(np.ndarray, buffer)
+
+    def _sample_obs_latency_steps(self, env_ids: np.ndarray) -> None:
+        low, high = self._obs_latency_bounds()
+        if bool(self._cfg.randomize_obs_latency) and high > low:
+            self._obs_latency_steps_per_env[env_ids] = np.random.randint(
+                low, high + 1, size=(env_ids.size,)
+            ).astype(np.int32)
+        else:
+            self._obs_latency_steps_per_env[env_ids] = high
+
+    def _apply_obs_latency(
+        self, frame_obs: np.ndarray, *, env_ids: np.ndarray | None = None
+    ) -> np.ndarray:
+        frame_obs = np.asarray(frame_obs, dtype=get_global_dtype())
+        batch_size = int(frame_obs.shape[0])
+        _, high = self._obs_latency_bounds()
+        if high <= 0:
+            return frame_obs
+
+        if env_ids is None and batch_size != self._num_envs:
+            return frame_obs
+
+        buffer = self._ensure_obs_latency_buffers()
+        if env_ids is None:
+            buffer[:, :-1] = buffer[:, 1:]
+            buffer[:, -1] = frame_obs
+            row_idx = np.arange(self._num_envs, dtype=np.int32)
+            col_idx = high - self._obs_latency_steps_per_env
+            return np.asarray(buffer[row_idx, col_idx], dtype=get_global_dtype()).copy()
+
+        env_ids = np.asarray(env_ids, dtype=np.int32)
+        self._sample_obs_latency_steps(env_ids)
+        buffer[env_ids] = np.broadcast_to(
+            frame_obs[:, None, :], (batch_size, high + 1, frame_obs.shape[1])
+        )
+        col_idx = high - self._obs_latency_steps_per_env[env_ids]
+        return np.asarray(buffer[env_ids, col_idx], dtype=get_global_dtype()).copy()
 
     def _update_obs_history(
         self, frame_obs: np.ndarray, *, env_ids: np.ndarray | None = None

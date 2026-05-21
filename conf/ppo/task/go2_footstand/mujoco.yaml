@@ -5,9 +5,13 @@ training:
 env:
   sim_dt: 0.004
   obs_history_len: 15
+  obs_latency_steps: 0
+  randomize_obs_latency: true
+  obs_latency_steps_range: [0, 2]
   energy_termination_threshold: 400.0
   control_config:
     action_scale: 0.3
+    simulate_action_latency: true
   domain_rand:
     randomize_floor_friction: true
     floor_friction_range: [0.4, 1.0]

@@ -470,6 +470,10 @@ def test_ppo_go2_footstand_uses_sim2real_smoothing_terms():
         cfg = compose("config", overrides=["task=go2_footstand/mujoco"])
 
     assert cfg.env.energy_termination_threshold == pytest.approx(400.0)
+    assert cfg.env.control_config.simulate_action_latency is True
+    assert cfg.env.obs_latency_steps == 0
+    assert cfg.env.randomize_obs_latency is True
+    assert cfg.env.obs_latency_steps_range == [0, 2]
     assert cfg.reward.scales.energy == pytest.approx(-0.003)
     assert cfg.reward.scales.dof_acc == pytest.approx(-2.5e-7)
     assert cfg.env.domain_rand.randomize_floor_friction is True

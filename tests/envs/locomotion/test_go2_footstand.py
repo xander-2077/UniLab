@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -59,10 +61,14 @@ def test_go2_footstand_cfg_uses_rear_body_contact_termination() -> None:
     assert isinstance(cfg.control_config, FootstandControlConfig)
     assert cfg.control_config.action_scale == pytest.approx(0.3)
     assert cfg.control_config.clip_actions == pytest.approx(1.0)
+    assert cfg.control_config.simulate_action_latency is False
     assert isinstance(cfg.domain_rand, Go2FootStandDomainRandConfig)
     assert cfg.domain_rand.randomize_kp is False
     assert cfg.domain_rand.randomize_floor_friction is True
     assert cfg.obs_history_len == 15
+    assert cfg.obs_latency_steps == 0
+    assert cfg.randomize_obs_latency is False
+    assert cfg.obs_latency_steps_range == [0, 0]
     assert cfg.soft_joint_pos_limit_factor == pytest.approx(0.9)
     assert cfg.energy_termination_threshold == np.inf
     assert cfg.termination_grace_steps == 100
@@ -127,8 +133,50 @@ def test_go2_footstand_pose_targets_front_legs_and_supports_rear() -> None:
     assert env._joint_ids == [6, 7, 8, 9, 10, 11]
     assert env._tar_ids == [0, 1, 2, 3, 4, 5]
     np.testing.assert_allclose(
-        env.target_angle, np.array([0.0, 1.82, -1.16, 0.0, 1.82, -1.16], dtype=np.float32)
+        env.target_angle, np.array([0.0, 0.82, -1.68, 0.0, 0.82, -1.6], dtype=np.float32)
     )
+
+
+def test_go2_footstand_front_leg_target_lifts_feet_body_forward() -> None:
+    import mujoco
+
+    env = object.__new__(Go2FootStandTask)
+    env._init_footstand_pose_targets()
+
+    model_path = (
+        Path(__file__).resolve().parents[3] / "src/unilab/assets/robots/go2/go2.xml"
+    )
+    model = mujoco.MjModel.from_xml_path(str(model_path))
+    data = mujoco.MjData(model)
+    data.qpos[:] = model.qpos0
+    data.qpos[0:3] = np.array([0.0, 0.0, 0.54])
+    data.qpos[3:7] = np.array([np.sqrt(0.5), 0.0, -np.sqrt(0.5), 0.0])
+
+    front_joint_names = (
+        "FL_hip_joint",
+        "FL_thigh_joint",
+        "FL_calf_joint",
+        "FR_hip_joint",
+        "FR_thigh_joint",
+        "FR_calf_joint",
+    )
+    for name, target in zip(front_joint_names, env.target_angle, strict=True):
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        data.qpos[model.jnt_qposadr[joint_id]] = target
+
+    mujoco.mj_forward(model, data)
+    base_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base")
+    base_pos = data.xpos[base_id]
+    front_foot_pos = np.stack(
+        [
+            data.geom_xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "FL")],
+            data.geom_xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "FR")],
+        ]
+    )
+    front_foot_pos_body = front_foot_pos - base_pos
+
+    assert np.all(front_foot_pos_body[:, 0] > 0.25)
+    assert np.all(front_foot_pos_body[:, 2] > 0.17)
 
 
 def test_go2_footstand_obs_matches_playground_state_layout() -> None:
@@ -205,6 +253,57 @@ def test_go2_footstand_reset_obs_fills_history_with_current_frame() -> None:
     np.testing.assert_allclose(frames[:, 0, :], frames[:, -1, :])
     np.testing.assert_allclose(env._obs_history[0], 0.0)
     np.testing.assert_allclose(env._obs_history[1], frames[0])
+
+
+def test_go2_footstand_obs_latency_delays_policy_frame() -> None:
+    env = object.__new__(Go2FootStandTask)
+    cfg = Go2FootStandCfg()
+    cfg.noise_config.level = 0.0
+    cfg.obs_latency_steps = 1
+    env._cfg = cfg
+    env._num_envs = 1
+    env.default_angles = np.zeros((1, 12), dtype=np.float32)
+    env._obs_history = np.zeros((1, cfg.obs_history_len, 45), dtype=np.float32)
+    env._init_obs_latency_buffers()
+
+    def _compute_with_linvel(x_value: float, *, env_ids: np.ndarray | None = None):
+        return env._compute_obs(
+            {"last_actions": np.zeros((1, 12), dtype=np.float32)},
+            np.array([[x_value, 0.0, 0.0]], dtype=np.float32),
+            np.zeros((1, 3), dtype=np.float32),
+            np.array([[0.0, 0.0, -1.0]], dtype=np.float32),
+            np.zeros((1, 12), dtype=np.float32),
+            np.zeros((1, 12), dtype=np.float32),
+            np.array([[0.53]], dtype=np.float32),
+            np.zeros((1, 3), dtype=np.float32),
+            np.zeros((1, 3), dtype=np.float32),
+            env_ids=env_ids,
+        )
+
+    reset_obs = _compute_with_linvel(1.0, env_ids=np.array([0], dtype=np.int32))
+    delayed_obs = _compute_with_linvel(2.0)
+
+    reset_frame = reset_obs["obs"].reshape(1, cfg.obs_history_len, 45)[:, -1, :]
+    delayed_frame = delayed_obs["obs"].reshape(1, cfg.obs_history_len, 45)[:, -1, :]
+    np.testing.assert_allclose(reset_frame[:, 0:3], np.array([[1.0, 0.0, 0.0]], dtype=np.float32))
+    np.testing.assert_allclose(
+        delayed_frame[:, 0:3], np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+    )
+
+
+def test_go2_footstand_random_obs_latency_samples_configured_range() -> None:
+    np.random.seed(3)
+    env = object.__new__(Go2FootStandTask)
+    cfg = Go2FootStandCfg()
+    cfg.randomize_obs_latency = True
+    cfg.obs_latency_steps_range = [0, 2]
+    env._cfg = cfg
+    env._num_envs = 32
+    env._init_obs_latency_buffers()
+    env._sample_obs_latency_steps(np.arange(env._num_envs, dtype=np.int32))
+
+    assert np.all(env._obs_latency_steps_per_env >= 0)
+    assert np.all(env._obs_latency_steps_per_env <= 2)
 
 
 class _EnergyTerminationBackend:
@@ -295,6 +394,29 @@ def test_go2_footstand_action_updates_incremental_motor_targets() -> None:
 
     np.testing.assert_allclose(ctrl, np.full((1, 12), 0.15, dtype=np.float32))
     np.testing.assert_allclose(state.info["last_actions"], np.full((1, 12), 0.1, dtype=np.float32))
+    np.testing.assert_allclose(
+        state.info["current_actions"], np.full((1, 12), 0.5, dtype=np.float32)
+    )
+
+
+def test_go2_footstand_action_latency_uses_previous_action() -> None:
+    env = object.__new__(Go2FootStandTask)
+    cfg = Go2FootStandCfg()
+    cfg.control_config.simulate_action_latency = True
+    env._cfg = cfg
+    env._motor_targets = np.zeros((1, 12), dtype=np.float32)
+    state = NpEnvState(
+        obs={},
+        reward=np.zeros((1,), dtype=np.float32),
+        terminated=np.zeros((1,), dtype=bool),
+        truncated=np.zeros((1,), dtype=bool),
+        info={"current_actions": np.full((1, 12), 0.2, dtype=np.float32)},
+    )
+
+    ctrl = env.apply_action(np.full((1, 12), 0.5, dtype=np.float32), state)
+
+    np.testing.assert_allclose(ctrl, np.full((1, 12), 0.06, dtype=np.float32))
+    np.testing.assert_allclose(state.info["last_actions"], np.full((1, 12), 0.2, dtype=np.float32))
     np.testing.assert_allclose(
         state.info["current_actions"], np.full((1, 12), 0.5, dtype=np.float32)
     )
