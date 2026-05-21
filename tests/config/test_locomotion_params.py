@@ -510,6 +510,26 @@ def test_ppo_him_go2_footstand_enables_linvel_estimator():
     assert cfg.env.randomize_obs_latency is True
 
 
+def test_ppo_go2_footstand_rough_task_compose():
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(CONF_DIR / "ppo"), version_base="1.3"):
+        cfg = compose("config", overrides=["task=go2_footstand_rough/mujoco"])
+
+    assert cfg.training.task_name == "Go2FootStandRough"
+    assert cfg.training.sim_backend == "mujoco"
+    assert cfg.env.scene.model_file.endswith("go2.xml")
+    assert cfg.env.scene.terrain.hfield_name == "terrain_hfield"
+    assert cfg.env.scene.terrain.geom_name == "floor"
+    assert cfg.env.scene.terrain.generator.num_rows == 5
+    assert cfg.env.scene.terrain.generator.num_cols == 5
+    assert cfg.env.terrain_curriculum.enabled is False
+    assert cfg.algo.empirical_normalization is True
+    assert cfg.reward.scales.height == pytest.approx(2.0)
+
+
 def test_ppo_g1_motion_tracking():
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra

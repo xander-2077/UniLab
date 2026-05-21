@@ -45,6 +45,7 @@ uv run scripts/generate_support_matrix.py --write
 | PPO (torch) | `go2_joystick_flat` (Go2 joystick) | Tested | Tested |
 | PPO (torch) | `go2_joystick_rough` (Go2 joystick rough) | Tested | Tested |
 | PPO (torch) | `go2_footstand` (Go2 footstand) | Tested | - |
+| PPO (torch) | `go2_footstand_rough` (Go2 footstand rough) | Tested | - |
 | PPO (torch) | `g1_walk_flat` (G1 walk flat) | Tested | Tested |
 | PPO (torch) | `g1_motion_tracking` (G1 motion tracking) | Tested | Tested |
 | PPO (torch) | `g1_flip_tracking` (G1 flip tracking) | Tested | Tested |
@@ -63,6 +64,7 @@ uv run scripts/generate_support_matrix.py --write
 | PPO (mlx) | `go2_joystick_flat` (Go2 joystick) | Tested | Tested |
 | PPO (mlx) | `go2_joystick_rough` (Go2 joystick rough) | Configured | Configured |
 | PPO (mlx) | `go2_footstand` (Go2 footstand) | Configured | - |
+| PPO (mlx) | `go2_footstand_rough` (Go2 footstand rough) | Configured | - |
 | PPO (mlx) | `g1_walk_flat` (G1 walk flat) | Tested | Tested |
 | PPO (mlx) | `g1_motion_tracking` (G1 motion tracking) | Configured | Configured |
 | PPO (mlx) | `g1_flip_tracking` (G1 flip tracking) | Configured | Configured |

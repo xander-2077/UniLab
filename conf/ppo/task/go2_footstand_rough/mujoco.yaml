@@ -1,0 +1,87 @@
+# @package _global_
+training:
+  task_name: Go2FootStandRough
+  sim_backend: mujoco
+  play_steps: 500
+  play_env_num: 16
+  render_spacing: 0.0
+  cam_tracking: true
+  cam_tracking_env_idx: 0
+  cam_tracking_extra_envs: 9
+
+interactive:
+  action_mode: policy
+  policy_obs_mode: auto
+  camera_follow_body: true
+  use_env_visual_model: false
+
+env:
+  sim_dt: 0.004
+  obs_history_len: 15
+  energy_termination_threshold: 200.0
+  control_config:
+    action_scale: 0.3
+  terrain_curriculum:
+    enabled: false
+  scene:
+    model_file: src/unilab/assets/robots/go2/go2.xml
+    fragment_files:
+      - src/unilab/assets/robots/go2/locomotion_task.xml
+    terrain:
+      hfield_name: terrain_hfield
+      geom_name: floor
+      generator:
+        seed: 42
+        curriculum: false
+        size: [6.0, 6.0]
+        num_rows: 5
+        num_cols: 5
+        border_width: 1.0
+        horizontal_scale: 0.2
+  domain_rand:
+    randomize_floor_friction: true
+    floor_friction_range: [0.4, 1.0]
+    randomize_link_mass: true
+    link_mass_scale_range: [0.9, 1.1]
+    torso_added_mass_range: [-1.0, 1.0]
+    randomize_torso_com: true
+    torso_com_offset_range: [-0.05, 0.05]
+    randomize_dof_armature: true
+    dof_armature_scale_range: [1.0, 1.05]
+    randomize_reset_joint_qpos: true
+    reset_joint_qpos_range: [-0.05, 0.05]
+
+algo:
+  empirical_normalization: true
+  num_envs: 4096
+  max_iterations: 10000
+  obs_groups:
+    actor:
+      - actor
+    critic:
+      - critic
+  policy:
+    init_noise_std: 0.5
+  algorithm:
+    entropy_coef: 0.005
+
+reward:
+  scales:
+    height: 2.0
+    orientation: 2.0
+    contact: -1.0
+    action_rate: -0.01
+    termination: -2.0
+    dof_pos_limits: -0.5
+    torques: 0.0
+    pose: -0.1
+    penalty_contact: -0.2
+    tar: 0.8
+    rear_feet_contact: 0.5
+    front_leg_motion: -0.05
+    upright_stability: -0.2
+    stay_still: -0.1
+    energy: -0.003
+    dof_acc: -2.5e-7
+  tracking_sigma: 0.25
+  base_height_target: 0.3

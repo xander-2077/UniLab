@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import numpy as np
 
+from unilab.assets import ASSETS_ROOT_PATH
 from unilab.base import registry
 from unilab.base.np_env import NpEnvState
+from unilab.base.scene import SceneCfg, TerrainSceneCfg
 from unilab.dr import ResetPlan, ResetRandomizationPayload
 from unilab.dtype_config import get_global_dtype
 from unilab.envs.common.rotation import np_quat_apply, np_quat_apply_inverse
 from unilab.envs.locomotion.common import rewards
 from unilab.envs.locomotion.common.rewards import RewardContext
+from unilab.envs.locomotion.common.terrain_spawn import (
+    TerrainCurriculumCfg,
+    TerrainSpawnManager,
+)
 from unilab.envs.locomotion.go2.base import ControlConfig, NoiseConfig
 from unilab.envs.locomotion.go2.handstand import (
     Go2DomainRandConfig,
@@ -19,6 +26,14 @@ from unilab.envs.locomotion.go2.handstand import (
     Go2HandStandDomainRandomizationProvider,
     Go2HandStandTask,
     JoystickSensor,
+)
+from unilab.terrains import (
+    SubTerrainCfg,
+    TerrainGeneratorCfg,
+    hf_pyramid_slope,
+    hf_pyramid_slope_inv,
+    random_rough,
+    wave_terrain,
 )
 
 _GO2_DOF_TO_CTRL = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8], dtype=np.int32)
@@ -105,6 +120,45 @@ class FootstandSensor(JoystickSensor):
     ]
 
 
+@dataclass(kw_only=True)
+class Go2FootStandRoughTerrainCfg(TerrainGeneratorCfg):
+    size: tuple[float, float] = (6.0, 6.0)
+    num_rows: int = 5
+    num_cols: int = 5
+    border_width: float = 1.0
+    add_lights: bool = True
+    horizontal_scale: float = 0.2
+
+    sub_terrains: dict[str, SubTerrainCfg] = field(
+        default_factory=lambda: {
+            "random_rough": random_rough(
+                proportion=0.55,
+                noise_range=(0.005, 0.05),
+                noise_step=0.005,
+                border_width=0.4,
+            ),
+            "wave_terrain": wave_terrain(
+                proportion=0.25,
+                amplitude_range=(0.01, 0.08),
+                num_waves=4,
+                border_width=0.4,
+            ),
+            "hf_pyramid_slope": hf_pyramid_slope(
+                proportion=0.10,
+                slope_range=(0.0, 0.18),
+                platform_width=2.0,
+                border_width=0.4,
+            ),
+            "hf_pyramid_slope_inv": hf_pyramid_slope_inv(
+                proportion=0.10,
+                slope_range=(0.0, 0.18),
+                platform_width=2.0,
+                border_width=0.4,
+            ),
+        }
+    )
+
+
 @registry.envcfg("Go2FootStand")
 @dataclass
 class Go2FootStandCfg(Go2HandStandCfg):
@@ -125,6 +179,25 @@ class Go2FootStandCfg(Go2HandStandCfg):
     )
     sensor: FootstandSensor = field(default_factory=FootstandSensor)  # type: ignore[assignment]
     domain_rand: Go2FootStandDomainRandConfig = field(default_factory=Go2FootStandDomainRandConfig)  # type: ignore[assignment]
+
+
+@registry.envcfg("Go2FootStandRough")
+@dataclass
+class Go2FootStandRoughCfg(Go2FootStandCfg):
+    scene: SceneCfg = field(
+        default_factory=lambda: SceneCfg(
+            model_file=str(ASSETS_ROOT_PATH / "robots" / "go2" / "go2.xml"),
+            fragment_files=[
+                str(ASSETS_ROOT_PATH / "robots" / "go2" / "locomotion_task.xml"),
+            ],
+            terrain=TerrainSceneCfg(
+                generator=Go2FootStandRoughTerrainCfg(),
+                hfield_name="terrain_hfield",
+                geom_name="floor",
+            ),
+        )
+    )
+    terrain_curriculum: TerrainCurriculumCfg = field(default_factory=TerrainCurriculumCfg)
 
 
 class Go2FootStandDomainRandomizationProvider(Go2HandStandDomainRandomizationProvider):
@@ -199,9 +272,8 @@ class Go2FootStandDomainRandomizationProvider(Go2HandStandDomainRandomizationPro
         dof_pos: Any,
         dof_vel: Any,
     ) -> dict[str, np.ndarray]:
-        height = env._backend.get_sensor_data(env._cfg.sensor.global_pos)[env_ids, -1].reshape(
-            -1, 1
-        )
+        global_pos = env._backend.get_sensor_data(env._cfg.sensor.global_pos)[env_ids]
+        height = env._terrain_relative_height_from_xyz(global_pos).reshape(-1, 1)
         local_gravity = env._get_local_gravity()[env_ids]
         accelerometer = env._backend.get_sensor_data(env._cfg.sensor.accelerometer)[env_ids]
         global_angvel = env._backend.get_sensor_data(env._cfg.sensor.global_angvel)[env_ids]
@@ -255,6 +327,7 @@ class Go2FootStandTask(Go2HandStandTask):
         self._base_body_mass = self._backend.get_body_mass()
         self._base_body_ipos = self._backend.get_body_ipos()
         self._base_dof_armature = self._backend.get_dof_armature()
+        self._init_terrain_context()
         self._init_domain_randomization(Go2FootStandDomainRandomizationProvider())
 
     def _init_task_domain_randomization(self) -> None:
@@ -386,6 +459,48 @@ class Go2FootStandTask(Go2HandStandTask):
             np_quat_apply(self._backend.get_base_quat(), forward), dtype=get_global_dtype()
         )
 
+    def _init_terrain_context(self) -> None:
+        self._scene_terrain_origins = getattr(self._backend, "terrain_origins", None)
+        self._terrain_surface_sampler = getattr(self._backend, "terrain_surface_sampler", None)
+        self._terrain_surface_sample_height = self._resolve_terrain_surface_sample_height()
+
+        scene_cfg = self._cfg.scene
+        terrain_generator = scene_cfg.terrain.generator if scene_cfg.terrain is not None else None
+        if self._scene_terrain_origins is None or terrain_generator is None:
+            return
+
+        self._spawn = TerrainSpawnManager(
+            self._num_envs,
+            self._scene_terrain_origins,
+            cell_size=float(terrain_generator.size[0]),
+            cfg=getattr(self._cfg, "terrain_curriculum", TerrainCurriculumCfg()),
+            terrain_surface_sampler=self._terrain_surface_sampler,
+        )
+
+    def _resolve_terrain_surface_sample_height(
+        self,
+    ) -> Callable[[np.ndarray], np.ndarray] | None:
+        sampler = self._terrain_surface_sampler
+        if sampler is None:
+            return None
+
+        sample_height = getattr(sampler, "sample_height", None)
+        if not callable(sample_height):
+            raise TypeError("terrain_surface_sampler must expose sample_height(xy)")
+        return cast(Callable[[np.ndarray], np.ndarray], sample_height)
+
+    def _terrain_relative_height_from_xyz(self, xyz: np.ndarray) -> np.ndarray:
+        xyz = np.asarray(xyz, dtype=get_global_dtype())
+        sample_height = self._terrain_surface_sample_height
+        if sample_height is None:
+            return np.asarray(xyz[:, 2], dtype=get_global_dtype())
+
+        surface = np.asarray(sample_height(xyz[:, :2]), dtype=get_global_dtype())
+        return np.asarray(xyz[:, 2] - surface, dtype=get_global_dtype())
+
+    def _reward_base_height_values(self) -> np.ndarray:
+        return self._terrain_relative_height_from_xyz(self._backend.get_base_pos())
+
     def _reward_height(self, ctx: RewardContext) -> np.ndarray:
         del ctx
         error = np.abs(self._z_des - self.torso_height)
@@ -427,7 +542,8 @@ class Go2FootStandTask(Go2HandStandTask):
             self.feet_force[:, i, :] = self._backend.get_sensor_data(self._cfg.sensor.feet_force[i])
         for i in range(len(self._cfg.sensor.feet_pos)):
             self.feet_pos[:, i, :] = self._backend.get_sensor_data(self._cfg.sensor.feet_pos[i])
-        self.torso_height = self._backend.get_sensor_data(self._cfg.sensor.global_pos)[:, -1]
+        global_pos = self._backend.get_sensor_data(self._cfg.sensor.global_pos)
+        self.torso_height = self._terrain_relative_height_from_xyz(global_pos)
         contact_arrays = []
         for name in self._cfg.sensor.ternamate_contact:
             arr = self._backend.get_sensor_data(name)
@@ -490,7 +606,7 @@ class Go2FootStandTask(Go2HandStandTask):
             default_angles=self.default_angles,
             tracking_sigma=cfg.tracking_sigma,
             base_height_target=cfg.base_height_target,
-            base_height=self._backend.get_base_pos()[:, 2],
+            base_height=self._reward_base_height_values(),
         )
 
         step_count = info.get("steps", np.zeros((self._num_envs,), dtype=np.uint32))
@@ -781,3 +897,8 @@ class Go2FootStandTask(Go2HandStandTask):
         angvel = self._backend.get_base_ang_vel()
         cost = np.sum(np.square(linvel), axis=1) + 0.25 * np.sum(np.square(angvel), axis=1)
         return np.asarray(cost * self._standing_mask(), dtype=get_global_dtype())
+
+
+@registry.env("Go2FootStandRough", sim_backend="mujoco")
+class Go2FootStandRoughTask(Go2FootStandTask):
+    _cfg: Go2FootStandRoughCfg

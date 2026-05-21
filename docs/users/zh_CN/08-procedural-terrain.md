@@ -13,11 +13,12 @@
 
 ## 现状
 
-当前仓库注册并接入程序化地形的任务只有一个：
+当前仓库注册并接入程序化地形的任务：
 
 | 任务 | owner YAML | 后端 | 入口算法 | 代码 |
 | --- | --- | --- | --- | --- |
 | `Go2JoystickRough` | [`mujoco.yaml`](../../../conf/ppo/task/go2_joystick_rough/mujoco.yaml), [`motrix.yaml`](../../../conf/ppo/task/go2_joystick_rough/motrix.yaml) | MuJoCo / Motrix | PPO (`train_rsl_rl.py`) | [`go2/rough.py`](../../../src/unilab/envs/locomotion/go2/rough.py) |
+| `Go2FootStandRough` | [`mujoco.yaml`](../../../conf/ppo/task/go2_footstand_rough/mujoco.yaml) | MuJoCo | PPO (`train_rsl_rl.py`) | [`go2/footstand.py`](../../../src/unilab/envs/locomotion/go2/footstand.py) |
 
 env 构造期会执行：
 
@@ -35,6 +36,12 @@ env 构造期会执行：
 ```bash
 # 默认 single-patch random_rough，critic 额外接入 17×11 height scan
 uv run train --algo ppo --task go2_joystick_rough --sim mujoco
+```
+
+Go2 footstand 的崎岖地形微调使用独立 owner task；obs/critic 维度保持与 `Go2FootStand` 一致，地形只影响 scene spawn 和地形相对高度：
+
+```bash
+uv run scripts/train_rsl_rl.py task=go2_footstand_rough/mujoco
 ```
 
 Motrix 后端使用同一个 task owner：

@@ -16,6 +16,8 @@ from unilab.envs.locomotion.go2.footstand import (
     Go2FootStandCfg,
     Go2FootStandDomainRandConfig,
     Go2FootStandDomainRandomizationProvider,
+    Go2FootStandRoughCfg,
+    Go2FootStandRoughTask,
     Go2FootStandTask,
 )
 from unilab.envs.locomotion.go2.handstand import RewardConfig
@@ -25,6 +27,14 @@ def test_go2_footstand_registers_mujoco_only() -> None:
     ensure_registries()
 
     meta = registry.list_registered_envs()["Go2FootStand"]
+
+    assert meta["available_backends"] == ["mujoco"]
+
+
+def test_go2_footstand_rough_registers_mujoco_only() -> None:
+    ensure_registries()
+
+    meta = registry.list_registered_envs()["Go2FootStandRough"]
 
     assert meta["available_backends"] == ["mujoco"]
 
@@ -44,6 +54,12 @@ class _BaseMotionBackend:
 
     def get_base_ang_vel(self) -> np.ndarray:
         return np.array([[0.0, 0.0, 2.0], [0.0, 2.0, 0.0]], dtype=np.float32)
+
+
+class _SurfaceSampler:
+    def sample_height(self, xy: np.ndarray) -> np.ndarray:
+        xy = np.asarray(xy, dtype=np.float32)
+        return xy[:, 0] * 0.1 + xy[:, 1] * 0.2
 
 
 def test_go2_footstand_cfg_uses_rear_body_contact_termination() -> None:
@@ -78,6 +94,33 @@ def test_go2_footstand_cfg_uses_rear_body_contact_termination() -> None:
     assert cfg.max_episode_seconds == pytest.approx(10.0)
 
 
+def test_go2_footstand_rough_cfg_keeps_ckpt_compatible_obs_and_adds_terrain() -> None:
+    cfg = Go2FootStandRoughCfg()
+    flat_cfg = Go2FootStandCfg()
+    env = object.__new__(Go2FootStandRoughTask)
+    env._cfg = cfg
+
+    assert cfg.scene.model_file.endswith("robots/go2/go2.xml")
+    assert cfg.scene.fragment_files[0].endswith("robots/go2/locomotion_task.xml")
+    assert cfg.scene.terrain is not None
+    assert cfg.scene.terrain.hfield_name == "terrain_hfield"
+    assert cfg.scene.terrain.geom_name == "floor"
+    assert cfg.scene.terrain.generator.num_rows == 5
+    assert cfg.scene.terrain.generator.num_cols == 5
+    assert list(cfg.scene.terrain.generator.sub_terrains) == [
+        "random_rough",
+        "wave_terrain",
+        "hf_pyramid_slope",
+        "hf_pyramid_slope_inv",
+    ]
+    assert cfg.terrain_curriculum.enabled is False
+    assert cfg.obs_history_len == flat_cfg.obs_history_len
+    assert env.obs_groups_spec == {
+        "obs": 45 * cfg.obs_history_len,
+        "critic": 45 * cfg.obs_history_len + 49,
+    }
+
+
 def test_go2_footstand_orientation_flips_handstand_target() -> None:
     env = object.__new__(Go2FootStandTask)
     env._backend = _OrientationBackend()
@@ -110,6 +153,17 @@ def test_go2_footstand_soft_joint_limits_use_playground_factor() -> None:
 
     np.testing.assert_allclose(env._soft_lowers, np.array([-1.0, 0.5], dtype=np.float32))
     np.testing.assert_allclose(env._soft_uppers, np.array([1.0, 1.5], dtype=np.float32))
+
+
+def test_go2_footstand_height_is_terrain_relative_when_sampler_is_present() -> None:
+    env = object.__new__(Go2FootStandTask)
+    env._terrain_surface_sample_height = _SurfaceSampler().sample_height
+
+    height = env._terrain_relative_height_from_xyz(
+        np.array([[1.0, 2.0, 1.2], [-1.0, 0.5, 0.4]], dtype=np.float32)
+    )
+
+    np.testing.assert_allclose(height, np.array([0.7, 0.4], dtype=np.float32))
 
 
 def test_go2_footstand_reward_functions_include_stability_terms() -> None:
@@ -405,6 +459,7 @@ def test_go2_footstand_energy_threshold_terminates() -> None:
     env._motor_targets = np.zeros((1, 12), dtype=np.float32)
     env._last_terminated = np.zeros((1,), dtype=bool)
     env._enable_reward_log = False
+    env._terrain_surface_sample_height = None
 
     state = NpEnvState(
         obs={},
@@ -654,6 +709,7 @@ def test_go2_footstand_post_grace_low_height_terminates() -> None:
     env._motor_targets = np.zeros((1, 12), dtype=np.float32)
     env._last_terminated = np.zeros((1,), dtype=bool)
     env._enable_reward_log = False
+    env._terrain_surface_sample_height = None
     env._orientation_score = lambda: np.array([1.0], dtype=np.float32)  # type: ignore[method-assign]
     state = NpEnvState(
         obs={},
@@ -694,6 +750,7 @@ def test_go2_footstand_returned_termination_does_not_alias_reset_bookkeeping() -
     env._motor_targets = np.zeros((1, 12), dtype=np.float32)
     env._last_terminated = np.zeros((1,), dtype=bool)
     env._enable_reward_log = False
+    env._terrain_surface_sample_height = None
     env._orientation_score = lambda: np.array([1.0], dtype=np.float32)  # type: ignore[method-assign]
     state = NpEnvState(
         obs={},
