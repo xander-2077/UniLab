@@ -144,10 +144,11 @@ class HIMPPO:
         assert self.storage is not None
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
-    def update(self) -> tuple[float, float, float, float]:
+    def update(self) -> dict[str, float]:
         assert self.storage is not None
         mean_value_loss = 0.0
         mean_surrogate_loss = 0.0
+        mean_entropy = 0.0
         mean_estimation_loss = 0.0
         mean_swap_loss = 0.0
 
@@ -233,22 +234,25 @@ class HIMPPO:
 
             mean_value_loss += float(value_loss.item())
             mean_surrogate_loss += float(surrogate_loss.item())
+            mean_entropy += float(entropy_batch.mean().item())
             mean_estimation_loss += float(estimation_loss)
             mean_swap_loss += float(swap_loss)
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        mean_entropy /= num_updates
         mean_estimation_loss /= num_updates
         mean_swap_loss /= num_updates
         self.storage.clear()
 
-        return (
-            mean_value_loss,
-            mean_surrogate_loss,
-            mean_estimation_loss,
-            mean_swap_loss,
-        )
+        return {
+            "value": mean_value_loss,
+            "surrogate": mean_surrogate_loss,
+            "entropy": mean_entropy,
+            "estimation": mean_estimation_loss,
+            "swap": mean_swap_loss,
+        }
 
 
 def _critic_obs(obs: TensorDict | torch.Tensor) -> torch.Tensor:

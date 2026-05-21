@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import statistics
 import time
 from collections import deque
 from typing import Any, Callable, cast
@@ -22,7 +23,9 @@ class _HIMLogger:
     def __init__(self) -> None:
         self.rewbuffer: deque[float] = deque(maxlen=100)
         self.lenbuffer: deque[float] = deque(maxlen=100)
+        self.ep_extras: list[dict[str, Any]] = []
         self.tot_timesteps: int = 0
+        self.tot_time: float = 0.0
 
 
 class HIMOnPolicyRunner:
@@ -124,6 +127,7 @@ class HIMOnPolicyRunner:
 
         for it in range(start_iter, tot_iter):
             infos: dict[str, Any] = {}
+            start = time.time()
             # ── Rollout collection ───────────────────────────────────────────
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
@@ -133,25 +137,21 @@ class HIMOnPolicyRunner:
                     next_obs = obs_td["actor"].to(self.device)
                     next_critic_obs = obs_td.get("critic", next_obs).to(self.device)
 
-                    # Track episode stats before env wrapper resets counters
-                    done_ids = dones.nonzero(as_tuple=False).flatten()
-                    self._ep_returns += rewards.to(self.device)
-                    self._ep_lengths += 1
-                    if len(done_ids) > 0:
-                        for idx in done_ids:
-                            self.logger.rewbuffer.append(float(self._ep_returns[idx]))
-                            self.logger.lenbuffer.append(float(self._ep_lengths[idx]))
-                        self._ep_returns[done_ids] = 0.0
-                        self._ep_lengths[done_ids] = 0.0
+                    self._process_env_step_for_logging(rewards, dones, infos)
 
                     self.alg.process_env_step(obs_td, rewards, dones, infos)
                     obs = next_obs
                     critic_obs = next_critic_obs
 
+                stop = time.time()
+                collect_time = stop - start
+                start = stop
+
                 self.alg.compute_returns(critic_obs)
 
             # ── Update ───────────────────────────────────────────────────────
-            value_loss, surrogate_loss, estimation_loss, swap_loss = self.alg.update()
+            loss_dict = self.alg.update()
+            learn_time = time.time() - start
 
             self.current_learning_iteration = it + 1
             self.logger.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -161,21 +161,16 @@ class HIMOnPolicyRunner:
             self._print_iter(
                 it + 1,
                 tot_iter,
-                value_loss,
-                surrogate_loss,
-                estimation_loss,
-                swap_loss,
+                loss_dict,
                 elapsed,
                 infos,
             )
-            if self._writer is not None:
-                global_step = self.current_learning_iteration
-                self._writer.add_scalar("train/value_loss", value_loss, global_step)
-                self._writer.add_scalar("train/surrogate_loss", surrogate_loss, global_step)
-                self._writer.add_scalar("train/estimation_loss", estimation_loss, global_step)
-                self._writer.add_scalar("train/swap_loss", swap_loss, global_step)
-                for k, v in (infos.get("log") or {}).items():
-                    self._writer.add_scalar(k, v, global_step)
+            self._write_tensorboard_scalars(
+                it=self.current_learning_iteration,
+                collect_time=collect_time,
+                learn_time=learn_time,
+                loss_dict=loss_dict,
+            )
 
             # ── Checkpoint ───────────────────────────────────────────────────
             if (
@@ -187,6 +182,8 @@ class HIMOnPolicyRunner:
         # Final checkpoint
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+        if self._writer is not None:
+            self._writer.flush()
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -212,6 +209,106 @@ class HIMOnPolicyRunner:
         if device is not None:
             self.actor_critic.to(device)
         return cast(Callable[..., Any], self.actor_critic.act_inference)
+
+    def _process_env_step_for_logging(
+        self,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        infos: dict[str, Any],
+    ) -> None:
+        """Mirror RSL-RL's rollout-side logging buffers for TensorBoard."""
+        if "episode" in infos and isinstance(infos["episode"], dict):
+            self.logger.ep_extras.append(infos["episode"])
+        elif "log" in infos and isinstance(infos["log"], dict):
+            self.logger.ep_extras.append(infos["log"])
+
+        done_ids = dones.nonzero(as_tuple=False).flatten()
+        self._ep_returns += rewards.to(self.device).view(-1)
+        self._ep_lengths += 1
+        if len(done_ids) == 0:
+            return
+
+        for idx in done_ids:
+            self.logger.rewbuffer.append(float(self._ep_returns[idx]))
+            self.logger.lenbuffer.append(float(self._ep_lengths[idx]))
+        self._ep_returns[done_ids] = 0.0
+        self._ep_lengths[done_ids] = 0.0
+
+    def _write_tensorboard_scalars(
+        self,
+        *,
+        it: int,
+        collect_time: float,
+        learn_time: float,
+        loss_dict: dict[str, float],
+    ) -> None:
+        if self._writer is None:
+            self.logger.ep_extras.clear()
+            return
+
+        collection_size = self.num_steps_per_env * self.env.num_envs
+        iteration_time = collect_time + learn_time
+        self.logger.tot_time += iteration_time
+
+        for key, value in self._mean_ep_extras().items():
+            tag = key if "/" in key else f"Episode/{key}"
+            self._writer.add_scalar(tag, value, it)
+
+        for key, value in loss_dict.items():
+            self._writer.add_scalar(f"Loss/{key}", value, it)
+        self._writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, it)
+
+        self._writer.add_scalar("Policy/mean_std", self.actor_critic.std.mean().item(), it)
+
+        fps = int(collection_size / max(iteration_time, 1.0e-9))
+        self._writer.add_scalar("Perf/total_fps", fps, it)
+        self._writer.add_scalar("Perf/collection_time", collect_time, it)
+        self._writer.add_scalar("Perf/learning_time", learn_time, it)
+
+        if len(self.logger.rewbuffer) > 0:
+            mean_reward = statistics.mean(self.logger.rewbuffer)
+            mean_episode_length = statistics.mean(self.logger.lenbuffer)
+            self._writer.add_scalar("Train/mean_reward", mean_reward, it)
+            self._writer.add_scalar("Train/mean_episode_length", mean_episode_length, it)
+            time_step = int(self.logger.tot_time)
+            self._writer.add_scalar("Train/mean_reward/time", mean_reward, time_step)
+            self._writer.add_scalar(
+                "Train/mean_episode_length/time",
+                mean_episode_length,
+                time_step,
+            )
+
+        # Keep the previous short-lived HIM tags for compatibility with runs
+        # created before the TensorBoard stream was aligned with RSL-RL.
+        self._writer.add_scalar("train/value_loss", loss_dict["value"], it)
+        self._writer.add_scalar("train/surrogate_loss", loss_dict["surrogate"], it)
+        self._writer.add_scalar("train/estimation_loss", loss_dict["estimation"], it)
+        self._writer.add_scalar("train/swap_loss", loss_dict["swap"], it)
+        self._writer.flush()
+        self.logger.ep_extras.clear()
+
+    def _mean_ep_extras(self) -> dict[str, float]:
+        means: dict[str, float] = {}
+        if not self.logger.ep_extras:
+            return means
+
+        keys = list(self.logger.ep_extras[0].keys())
+        for key in keys:
+            values: list[torch.Tensor] = []
+            for ep_info in self.logger.ep_extras:
+                if key not in ep_info:
+                    continue
+                raw = ep_info[key]
+                if isinstance(raw, torch.Tensor):
+                    tensor = raw.to(self.device)
+                else:
+                    tensor = torch.as_tensor(raw, device=self.device)
+                if tensor.ndim == 0:
+                    tensor = tensor.unsqueeze(0)
+                values.append(tensor.float().reshape(-1))
+            if values:
+                means[key] = float(torch.cat(values).mean().item())
+        return means
 
     def export_policy_to_onnx(self, path: str, filename: str = "policy.onnx") -> None:
         """Export the end-to-end HIM-PPO policy (estimator + actor) to ONNX.
@@ -284,10 +381,7 @@ class HIMOnPolicyRunner:
         self,
         it: int,
         tot: int,
-        value_loss: float,
-        surrogate_loss: float,
-        estimation_loss: float,
-        swap_loss: float,
+        loss_dict: dict[str, float],
         elapsed: float,
         infos: dict,
     ) -> None:
@@ -307,10 +401,11 @@ class HIMOnPolicyRunner:
         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta))
         print(sep)
         print(f"{'Iteration':>40}: {it}/{tot}")
-        print(f"{'Mean value loss':>40}: {value_loss:.4f}")
-        print(f"{'Mean surrogate loss':>40}: {surrogate_loss:.4f}")
-        print(f"{'Mean estimation loss':>40}: {estimation_loss:.4f}")
-        print(f"{'Mean swap loss':>40}: {swap_loss:.4f}")
+        print(f"{'Mean value loss':>40}: {loss_dict['value']:.4f}")
+        print(f"{'Mean surrogate loss':>40}: {loss_dict['surrogate']:.4f}")
+        print(f"{'Mean entropy':>40}: {loss_dict['entropy']:.4f}")
+        print(f"{'Mean estimation loss':>40}: {loss_dict['estimation']:.4f}")
+        print(f"{'Mean swap loss':>40}: {loss_dict['swap']:.4f}")
         if mean_rew:
             print(f"{'Mean episode reward':>40}: {mean_rew:.4f}")
         if mean_len:
