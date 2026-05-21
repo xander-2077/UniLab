@@ -1,0 +1,71 @@
+# @package _global_
+training:
+  task_name: Go2FootStand
+  sim_backend: mujoco
+env:
+  sim_dt: 0.004
+  obs_history_len: 15
+  obs_latency_steps: 0
+  randomize_obs_latency: true
+  obs_latency_steps_range: [0, 2]
+  estimate_linvel: true
+  energy_termination_threshold: 400.0
+  control_config:
+    action_scale: 0.25
+    simulate_action_latency: true
+  domain_rand:
+    randomize_floor_friction: true
+    floor_friction_range: [0.4, 1.0]
+    randomize_link_mass: true
+    link_mass_scale_range: [0.9, 1.1]
+    torso_added_mass_range: [-1.0, 1.0]
+    randomize_torso_com: true
+    torso_com_offset_range: [-0.05, 0.05]
+    randomize_dof_armature: true
+    dof_armature_scale_range: [1.0, 1.05]
+    randomize_reset_joint_qpos: true
+    reset_joint_qpos_range: [-0.05, 0.05]
+algo:
+  num_envs: 4096
+  max_iterations: 10000
+  save_interval: 100
+  num_one_step_obs: 42
+  num_actor_history: 15
+  num_critic_history: 1
+  empirical_normalization: false
+  policy:
+    init_noise_std: 0.35
+    actor_hidden_dims: [512, 256, 128]
+    critic_hidden_dims: [512, 256, 128]
+    activation: elu
+  estimator:
+    enc_hidden_dims: [128, 64, 16]
+    tar_hidden_dims: [128, 64]
+    learning_rate: 1.0e-3
+    num_prototype: 32
+    temperature: 3.0
+    velocity_target_start: 0
+    target_obs_start: 3
+  algorithm:
+    learning_rate: 1.0e-3
+    entropy_coef: 0.002
+reward:
+  scales:
+    height: 2.0
+    orientation: 2.0
+    contact: -1.0
+    action_rate: -0.02
+    termination: -5.0
+    dof_pos_limits: -0.5
+    torques: 0.0
+    pose: -0.1
+    penalty_contact: -0.2
+    tar: 0.8
+    rear_feet_contact: 0.5
+    front_leg_motion: -0.1
+    upright_stability: -0.4
+    stay_still: -0.2
+    energy: -0.005
+    dof_acc: -5.0e-7
+  tracking_sigma: 0.25
+  base_height_target: 0.3

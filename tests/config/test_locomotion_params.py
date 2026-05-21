@@ -491,6 +491,25 @@ def test_ppo_go2_footstand_uses_sim2real_smoothing_terms():
     assert cfg.env.domain_rand.randomize_reset_joint_qpos is True
 
 
+def test_ppo_him_go2_footstand_enables_linvel_estimator():
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(CONF_DIR / "ppo_him"), version_base="1.3"):
+        cfg = compose("config", overrides=["task=go2_footstand/mujoco"])
+
+    assert cfg.training.task_name == "Go2FootStand"
+    assert cfg.env.estimate_linvel is True
+    assert cfg.env.obs_history_len == 15
+    assert cfg.algo.num_one_step_obs == 42
+    assert cfg.algo.num_actor_history == 15
+    assert cfg.algo.estimator.velocity_target_start == 0
+    assert cfg.algo.estimator.target_obs_start == 3
+    assert cfg.env.control_config.simulate_action_latency is True
+    assert cfg.env.randomize_obs_latency is True
+
+
 def test_ppo_g1_motion_tracking():
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra

@@ -69,6 +69,7 @@ def test_go2_footstand_cfg_uses_rear_body_contact_termination() -> None:
     assert cfg.obs_latency_steps == 0
     assert cfg.randomize_obs_latency is False
     assert cfg.obs_latency_steps_range == [0, 0]
+    assert cfg.estimate_linvel is False
     assert cfg.soft_joint_pos_limit_factor == pytest.approx(0.9)
     assert cfg.energy_termination_threshold == np.inf
     assert cfg.termination_grace_steps == 100
@@ -219,6 +220,49 @@ def test_go2_footstand_obs_matches_playground_state_layout() -> None:
     np.testing.assert_allclose(current_frame[:, 3:6], gyro)
     np.testing.assert_allclose(current_frame[:, 6:9], gravity)
     np.testing.assert_allclose(current_frame[:, -12:], last_actions)
+
+
+def test_go2_footstand_linvel_estimator_obs_hides_actor_linvel() -> None:
+    env = object.__new__(Go2FootStandTask)
+    cfg = Go2FootStandCfg()
+    cfg.noise_config.level = 0.0
+    cfg.estimate_linvel = True
+    env._cfg = cfg
+    env._num_envs = 1
+    env.default_angles = np.arange(12, dtype=np.float32).reshape(1, 12)
+    env._obs_history = np.zeros((1, cfg.obs_history_len, 42), dtype=np.float32)
+
+    linvel = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    gyro = np.array([[4.0, 5.0, 6.0]], dtype=np.float32)
+    gravity = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
+    dof_pos = env.default_angles + 0.5
+    dof_vel = np.arange(12, dtype=np.float32).reshape(1, 12) + 10.0
+    last_actions = np.full((1, 12), 0.25, dtype=np.float32)
+    torques = np.arange(12, dtype=np.float32).reshape(1, 12) + 20.0
+
+    obs = env._compute_obs(
+        {"last_actions": last_actions, "torques": torques},
+        linvel,
+        gyro,
+        gravity,
+        dof_pos,
+        dof_vel,
+        np.array([[0.53]], dtype=np.float32),
+        np.zeros((1, 3), dtype=np.float32),
+        np.zeros((1, 3), dtype=np.float32),
+    )
+
+    current_actor_frame = obs["obs"][:, -42:]
+    critic_head = obs["critic"][:, :45]
+    assert obs["obs"].shape == (1, 630)
+    assert obs["critic"].shape == (1, 724)
+    np.testing.assert_allclose(current_actor_frame[:, 0:3], gyro)
+    np.testing.assert_allclose(current_actor_frame[:, 3:6], gravity)
+    np.testing.assert_allclose(current_actor_frame[:, -12:], last_actions)
+    np.testing.assert_allclose(critic_head[:, 0:3], linvel)
+    np.testing.assert_allclose(critic_head[:, 3:6], gyro)
+    np.testing.assert_allclose(critic_head[:, 6:9], gravity)
+    np.testing.assert_allclose(obs["critic"][:, 45 : 45 + 630], obs["obs"])
 
 
 def test_go2_footstand_reset_obs_fills_history_with_current_frame() -> None:

@@ -99,6 +99,59 @@ def test_train_profile_routes_to_owner_variant(tmp_path: Path) -> None:
     ]
 
 
+def test_train_ppo_him_routes_to_him_entrypoint(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir(parents=True)
+    (tmp_path / "scripts" / "train_him_ppo.py").write_text("", encoding="utf-8")
+    owner_dir = tmp_path / "conf" / "ppo_him" / "task" / "go2_footstand"
+    owner_dir.mkdir(parents=True)
+    (owner_dir / "mujoco.yaml").write_text(
+        "training:\n  sim_backend: mujoco\n",
+        encoding="utf-8",
+    )
+
+    command = cli.build_command(
+        mode="train",
+        algo="ppo_him",
+        task="go2_footstand",
+        sim="mujoco",
+        overrides=[],
+        root=tmp_path,
+    )
+
+    assert command[1:] == [
+        str(tmp_path / "scripts" / "train_him_ppo.py"),
+        "task=go2_footstand/mujoco",
+    ]
+
+
+def test_eval_ppo_him_routes_to_him_entrypoint_with_play_only(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir(parents=True)
+    (tmp_path / "scripts" / "train_him_ppo.py").write_text("", encoding="utf-8")
+    owner_dir = tmp_path / "conf" / "ppo_him" / "task" / "go2_footstand"
+    owner_dir.mkdir(parents=True)
+    (owner_dir / "mujoco.yaml").write_text(
+        "training:\n  sim_backend: mujoco\n",
+        encoding="utf-8",
+    )
+
+    command = cli.build_command(
+        mode="eval",
+        algo="ppo_him",
+        task="go2_footstand",
+        sim="mujoco",
+        overrides=[],
+        load_run="2026-05-21_10-57-10_mujoco",
+        root=tmp_path,
+    )
+
+    assert command[1:] == [
+        str(tmp_path / "scripts" / "train_him_ppo.py"),
+        "task=go2_footstand/mujoco",
+        "training.play_only=true",
+        "algo.load_run=2026-05-21_10-57-10_mujoco",
+    ]
+
+
 def test_macos_motrix_eval_requires_mxpython(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -80,11 +80,14 @@ class HIMActorCritic(nn.Module):
     def forward(self) -> torch.Tensor:
         raise NotImplementedError
 
+    def _current_actor_obs(self, obs_history: torch.Tensor) -> torch.Tensor:
+        return obs_history[:, -self.num_one_step_obs :]
+
     def update_distribution(self, obs_history: torch.Tensor) -> None:
         with torch.no_grad():
             vel, latent = self.estimator(obs_history)
         actor_input = torch.cat(
-            (obs_history[:, : self.num_one_step_obs], vel, latent),
+            (self._current_actor_obs(obs_history), vel, latent),
             dim=-1,
         )
         mean = self.actor(actor_input)
@@ -104,7 +107,7 @@ class HIMActorCritic(nn.Module):
         del observations
         vel, latent = self.estimator(obs_history)
         actor_input = torch.cat(
-            (obs_history[:, : self.num_one_step_obs], vel, latent),
+            (self._current_actor_obs(obs_history), vel, latent),
             dim=-1,
         )
         return self.actor(actor_input)

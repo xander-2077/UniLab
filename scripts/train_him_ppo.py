@@ -18,7 +18,7 @@ if str(SRC_DIR) not in sys.path:
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from unilab.base.backend.xml import materialize_scene_visual_override
+from unilab.base.backend.mujoco.xml import materialize_scene_visual_override
 
 from unilab.algos.torch.him_ppo.runner import HIMOnPolicyRunner
 from unilab.training import (
@@ -28,10 +28,11 @@ from unilab.training import (
     get_latest_checkpoint,
     get_latest_run,
     get_log_root,
+    log_playback_plan,
     parse_checkpoint_path,
+    should_run_playback,
 )
 from unilab.training.experiment import ExperimentTracker
-from unilab.visualization import render_play_mode
 
 
 def _backend_adapter(cfg: DictConfig) -> BackendAdapter:
@@ -127,18 +128,24 @@ def play_him_ppo(cfg: DictConfig, device: str) -> str | None:
         runner.export_policy_to_onnx(path=str(load_path_dir))
         runner.export_policy_to_jit(path=str(load_path_dir))
 
+    num_steps = int(cfg.training.play_steps) if cfg.training.play_steps is not None else None
     output_video = Path(load_path_dir) / "play_video.mp4"
-    print(f"Rendering video to {output_video}...")
-    print("Collecting physics states...")
+    playback_mode: str | None = None
+
+    def _log_plan(plan) -> None:
+        nonlocal playback_mode
+        playback_mode = plan.mode
+        log_playback_plan(plan)
+
     with torch.inference_mode():
-        render_play_mode(
-            env,
-            sim_backend=cfg.training.sim_backend,
+        play_video_path = env.run_playback_mode(
+            play_render_mode=getattr(cfg.training, "play_render_mode", "auto"),
+            play_steps=num_steps,
+            output_video=output_video,
             render_spacing=float(
                 getattr(cfg.training, "render_spacing", getattr(env.cfg, "render_spacing", 1.0))
             ),
-            num_steps=cfg.training.play_steps,
-            output_video=output_video,
+            render_offset_mode=str(getattr(env.cfg, "render_offset_mode", "grid")),
             initialize=lambda: wrapped_env.reset()[0]["actor"],
             step=lambda obs: wrapped_env.step(policy(obs))[0]["actor"],
             camera_kwargs={
@@ -155,9 +162,11 @@ def play_him_ppo(cfg: DictConfig, device: str) -> str | None:
                 if hasattr(env, "curr_ee_goal_world")
                 else None
             ),
+            on_plan=_log_plan,
         )
-    print("Done.")
-    return str(output_video)
+    if playback_mode != "none" and num_steps is not None:
+        print("Done.")
+    return play_video_path
 
 
 @hydra.main(version_base="1.3", config_path="../conf/ppo_him", config_name="config")
@@ -253,7 +262,11 @@ def main(cfg: DictConfig) -> None:
                 tracker.update_summary(train_summary)
             env.close()
 
-        if cfg.training.play_only or not cfg.training.no_play:
+        if should_run_playback(
+            play_only=cfg.training.play_only,
+            no_play=cfg.training.no_play,
+            play_render_mode=getattr(cfg.training, "play_render_mode", "auto"),
+        ):
             play_video_path = play_him_ppo(cfg, device)
             if tracker is not None:
                 tracker.log_video(play_video_path)

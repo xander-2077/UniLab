@@ -25,6 +25,7 @@ _GO2_DOF_TO_CTRL = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8], dtype=np.int
 _WORLD_GRAVITY = np.array([0.0, 0.0, -1.0], dtype=np.float32)
 _BODY_FORWARD = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 _FOOTSTAND_FRAME_OBS_DIM = 45
+_FOOTSTAND_ESTIMATOR_FRAME_OBS_DIM = _FOOTSTAND_FRAME_OBS_DIM - 3
 _FOOTSTAND_PRIVILEGED_TAIL_DIM = 49
 _FOOTSTAND_MIN_OBS_HISTORY_LEN = 15
 _FOOTSTAND_FRONT_FEET = [0, 1]
@@ -112,6 +113,7 @@ class Go2FootStandCfg(Go2HandStandCfg):
     obs_latency_steps: int = 0
     randomize_obs_latency: bool = False
     obs_latency_steps_range: list[int] = field(default_factory=lambda: [0, 0])
+    estimate_linvel: bool = False
     soft_joint_pos_limit_factor: float = 0.9
     energy_termination_threshold: float = np.inf
     termination_grace_steps: int = 100
@@ -243,7 +245,7 @@ class Go2FootStandTask(Go2HandStandTask):
         self._last_terminated = np.zeros((num_envs,), dtype=bool)
         self._motor_targets = np.zeros((num_envs, self._num_action), dtype=get_global_dtype())
         self._obs_history = np.zeros(
-            (num_envs, self._obs_history_len, _FOOTSTAND_FRAME_OBS_DIM),
+            (num_envs, self._obs_history_len, self._actor_frame_obs_dim),
             dtype=get_global_dtype(),
         )
         self._init_obs_latency_buffers()
@@ -269,12 +271,30 @@ class Go2FootStandTask(Go2HandStandTask):
         # Playground state:
         # linvel(3) + gyro(3) + gravity(3) + diff(12) + dof_vel(12) + last_action(12) = 45.
         # UniLab stacks the actor state for short-horizon dynamics; critic appends current privileged tail.
-        obs_dim = _FOOTSTAND_FRAME_OBS_DIM * self._obs_history_len
-        return {"obs": obs_dim, "critic": obs_dim + _FOOTSTAND_PRIVILEGED_TAIL_DIM}
+        obs_dim = self._actor_frame_obs_dim * self._obs_history_len
+        if self._uses_linvel_estimator:
+            # Critic head layout is linvel(3) + actor_frame(42). HIMEstimator uses
+            # these first 45 dims as supervised target data; the actor never sees linvel.
+            critic_dim = _FOOTSTAND_FRAME_OBS_DIM + obs_dim + _FOOTSTAND_PRIVILEGED_TAIL_DIM
+        else:
+            critic_dim = obs_dim + _FOOTSTAND_PRIVILEGED_TAIL_DIM
+        return {"obs": obs_dim, "critic": critic_dim}
 
     @property
     def _obs_history_len(self) -> int:
         return max(_FOOTSTAND_MIN_OBS_HISTORY_LEN, int(self._cfg.obs_history_len))
+
+    @property
+    def _uses_linvel_estimator(self) -> bool:
+        return bool(getattr(self._cfg, "estimate_linvel", False))
+
+    @property
+    def _actor_frame_obs_dim(self) -> int:
+        return (
+            _FOOTSTAND_ESTIMATOR_FRAME_OBS_DIM
+            if self._uses_linvel_estimator
+            else _FOOTSTAND_FRAME_OBS_DIM
+        )
 
     def _build_playground_reset_randomization(
         self, num_reset: int
@@ -511,29 +531,33 @@ class Go2FootStandTask(Go2HandStandTask):
         noisy_dof_vel = self._obs_noise(dof_vel, noise_cfg.scale_joint_vel)
         last_actions = info.get("last_actions", np.zeros_like(diff))
 
-        obs = np.concatenate(
+        frame_obs = np.concatenate(
             [noisy_linvel, noisy_gyro, noisy_gravity, noisy_diff, noisy_dof_vel, last_actions],
             axis=1,
             dtype=get_global_dtype(),
         )
-        obs = self._apply_obs_latency(obs, env_ids=env_ids)
-        obs = self._update_obs_history(obs, env_ids=env_ids)
+        frame_obs = self._apply_obs_latency(frame_obs, env_ids=env_ids)
+        if self._uses_linvel_estimator:
+            actor_frame_obs = frame_obs[:, 3:]
+            obs = self._update_obs_history(actor_frame_obs, env_ids=env_ids)
+        else:
+            obs = self._update_obs_history(frame_obs, env_ids=env_ids)
         torques = np.asarray(info.get("torques", np.zeros_like(dof_pos)), dtype=get_global_dtype())
-        critic = np.concatenate(
-            [
-                obs,
-                gyro,
-                accelerometer,
-                linvel,
-                global_angvel,
-                dof_pos,
-                dof_vel,
-                torques,
-                height,
-            ],
-            axis=1,
-            dtype=get_global_dtype(),
-        )
+        critic_parts = []
+        if self._uses_linvel_estimator:
+            critic_parts.append(frame_obs)
+        critic_parts += [
+            obs,
+            gyro,
+            accelerometer,
+            linvel,
+            global_angvel,
+            dof_pos,
+            dof_vel,
+            torques,
+            height,
+        ]
+        critic = np.concatenate(critic_parts, axis=1, dtype=get_global_dtype())
         return {"obs": obs, "critic": critic}
 
     def _obs_latency_bounds(self) -> tuple[int, int]:
@@ -622,7 +646,8 @@ class Go2FootStandTask(Go2HandStandTask):
         frame_obs = np.asarray(frame_obs, dtype=get_global_dtype())
         batch_size = int(frame_obs.shape[0])
         history_len = self._obs_history_len
-        expected_shape = (self._num_envs, history_len, _FOOTSTAND_FRAME_OBS_DIM)
+        frame_dim = int(frame_obs.shape[1])
+        expected_shape = (self._num_envs, history_len, frame_dim)
         history = getattr(self, "_obs_history", None)
         if history is None or history.shape != expected_shape:
             if env_ids is None and batch_size == self._num_envs:
