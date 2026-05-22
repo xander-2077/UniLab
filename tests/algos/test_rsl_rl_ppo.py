@@ -4,7 +4,10 @@ import torch
 from tensordict import TensorDict
 
 from unilab.algos.torch.rsl_rl_ppo import FinalObservationAwarePPO
-from unilab.training.rsl_rl import RslRlVecEnvWrapper
+from unilab.training.rsl_rl import (
+    HistoryObsDistillationWrapper,
+    RslRlVecEnvWrapper,
+)
 
 
 class _FakeActor:
@@ -116,3 +119,56 @@ def test_rsl_rl_adapter_outputs_combined_dones_and_time_outs_alias():
 
     assert torch.equal(dones, torch.tensor([True, True, False]))
     assert torch.equal(infos["time_outs"], torch.tensor([False, True, False]))
+
+
+def test_history_obs_distillation_wrapper_projects_student_obs_per_frame():
+    class FakeEnv:
+        def __init__(self):
+            self.num_envs = 2
+            self.cfg = type("Cfg", (), {"max_episode_seconds": 10.0, "ctrl_dt": 0.02})()
+            self.observation_space = type("Space", (), {"shape": (10,)})()
+            self.action_space = type("Space", (), {"shape": (1,)})()
+            self.obs_groups_spec = {"obs": 10}
+            self.state = type("State", (), {"obs": {"obs": self._obs()}})()
+
+        def _obs(self):
+            return torch.tensor(
+                [
+                    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+                    [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+                ],
+                dtype=torch.float32,
+            ).numpy()
+
+        def init_state(self):
+            pass
+
+        def reset(self, env_indices):
+            del env_indices
+            return {"obs": self._obs()}, {}
+
+    wrapper = HistoryObsDistillationWrapper(
+        FakeEnv(),
+        device="cpu",
+        teacher_obs_group="obs",
+        student_frame_dim=5,
+        student_drop_start=0,
+        student_drop_dim=1,
+    )
+
+    obs, _ = wrapper.reset()
+
+    assert wrapper.num_obs == 8
+    assert wrapper.num_privileged_obs == 10
+    assert obs["teacher"].shape == (2, 10)
+    assert obs["student"].shape == (2, 8)
+    assert torch.equal(
+        obs["student"],
+        torch.tensor(
+            [
+                [1, 2, 3, 4, 6, 7, 8, 9],
+                [11, 12, 13, 14, 16, 17, 18, 19],
+            ],
+            dtype=torch.float32,
+        ),
+    )

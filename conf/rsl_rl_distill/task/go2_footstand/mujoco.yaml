@@ -5,6 +5,7 @@ training:
 env:
   sim_dt: 0.004
   obs_history_len: 15
+  estimate_linvel: false
   obs_latency_steps: 0
   randomize_obs_latency: true
   obs_latency_steps_range: [0, 2]
@@ -24,20 +25,6 @@ env:
     dof_armature_scale_range: [1.0, 1.05]
     randomize_reset_joint_qpos: true
     reset_joint_qpos_range: [-0.05, 0.05]
-algo:
-  empirical_normalization: true
-  num_envs: 1024 # 4096  # 1024
-  # max_iterations: 3000
-  max_iterations: 10000
-  obs_groups:
-    actor:
-      - actor
-    critic:
-      - critic
-  policy:
-    init_noise_std: 0.35
-  algorithm:
-    entropy_coef: 0.002
 reward:
   scales:
     height: 2.0
