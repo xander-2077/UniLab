@@ -26,7 +26,7 @@ env:
     reset_joint_qpos_range: [-0.05, 0.05]
 algo:
   empirical_normalization: true
-  num_envs: 4096  # 1024
+  num_envs: 1024 # 4096  # 1024
   # max_iterations: 3000
   max_iterations: 10000
   obs_groups:
