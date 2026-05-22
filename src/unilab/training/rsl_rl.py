@@ -225,3 +225,91 @@ class RslRlVecEnvWrapper:
 
     def close(self) -> None:
         self.env.close()
+
+
+class HistoryObsDistillationWrapper(RslRlVecEnvWrapper):
+    """RSL-RL distillation wrapper that derives student obs by dropping per-frame fields."""
+
+    def __init__(
+        self,
+        env: Any,
+        device: str = "cpu",
+        *,
+        teacher_obs_group: str = "obs",
+        student_frame_dim: int,
+        student_drop_start: int = 0,
+        student_drop_dim: int = 3,
+    ) -> None:
+        self.teacher_obs_group = teacher_obs_group
+        self.student_frame_dim = int(student_frame_dim)
+        self.student_drop_start = int(student_drop_start)
+        self.student_drop_dim = int(student_drop_dim)
+        self._validate_projection_config()
+        super().__init__(env, device=device, policy_obs_mode="actor")
+
+        teacher_dim = int(env.obs_groups_spec[self.teacher_obs_group])
+        student_dim = self._projected_dim(teacher_dim)
+        self._actor_obs_dim = student_dim
+        self._flat_obs_dim = student_dim
+        self.num_obs = student_dim
+        self.num_privileged_obs = teacher_dim
+
+    def _validate_projection_config(self) -> None:
+        if self.student_frame_dim <= 0:
+            raise ValueError("student_frame_dim must be positive")
+        if self.student_drop_start < 0:
+            raise ValueError("student_drop_start must be non-negative")
+        if self.student_drop_dim <= 0:
+            raise ValueError("student_drop_dim must be positive")
+        if self.student_drop_start + self.student_drop_dim > self.student_frame_dim:
+            raise ValueError(
+                "student drop range must fit inside one frame: "
+                f"start={self.student_drop_start} dim={self.student_drop_dim} "
+                f"frame_dim={self.student_frame_dim}"
+            )
+
+    def _projected_dim(self, teacher_dim: int) -> int:
+        if teacher_dim % self.student_frame_dim != 0:
+            raise ValueError(
+                f"teacher obs dim {teacher_dim} must be divisible by "
+                f"student_frame_dim={self.student_frame_dim}"
+            )
+        history_len = teacher_dim // self.student_frame_dim
+        return history_len * (self.student_frame_dim - self.student_drop_dim)
+
+    def _student_obs_from_teacher(self, teacher_obs: torch.Tensor) -> torch.Tensor:
+        teacher_dim = int(teacher_obs.shape[-1])
+        self._projected_dim(teacher_dim)
+        frames = teacher_obs.reshape(*teacher_obs.shape[:-1], -1, self.student_frame_dim)
+        keep = torch.ones(self.student_frame_dim, dtype=torch.bool, device=teacher_obs.device)
+        drop_end = self.student_drop_start + self.student_drop_dim
+        keep[self.student_drop_start : drop_end] = False
+        projected = frames[..., keep]
+        return projected.reshape(*teacher_obs.shape[:-1], -1)
+
+    def _obs_to_tensordict(
+        self,
+        obs: dict[str, Any],
+        info: dict[str, Any] | None = None,
+    ) -> TensorDict:
+        del info
+        if self.teacher_obs_group not in obs:
+            raise KeyError(
+                f"Observation dict does not contain teacher_obs_group={self.teacher_obs_group!r}"
+            )
+
+        teacher_obs = to_torch(obs[self.teacher_obs_group], self.device)
+        student_obs = self._student_obs_from_teacher(teacher_obs)
+        td_dict: dict[str, torch.Tensor] = {
+            "student": student_obs,
+            "teacher": teacher_obs,
+            "actor": student_obs,
+            "policy": student_obs,
+        }
+        if "critic" in obs:
+            td_dict["critic"] = to_torch(obs["critic"], self.device)
+        return TensorDict(td_dict, batch_size=self.num_envs, device=self.device)
+
+    def get_privileged_observations(self) -> torch.Tensor:
+        assert self.env.state is not None
+        return to_torch(self.env.state.obs[self.teacher_obs_group], self.device)
