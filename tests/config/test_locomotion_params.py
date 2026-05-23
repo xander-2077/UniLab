@@ -469,14 +469,22 @@ def test_ppo_go2_footstand_uses_sim2real_smoothing_terms():
     with initialize_config_dir(config_dir=str(CONF_DIR / "ppo"), version_base="1.3"):
         cfg = compose("config", overrides=["task=go2_footstand/mujoco"])
 
+    assert cfg.env.estimate_linvel is True
     assert cfg.env.energy_termination_threshold == pytest.approx(400.0)
     assert cfg.env.control_config.action_scale == pytest.approx(0.25)
     assert cfg.env.control_config.simulate_action_latency is True
     assert cfg.env.obs_latency_steps == 0
     assert cfg.env.randomize_obs_latency is True
     assert cfg.env.obs_latency_steps_range == [0, 2]
+    assert cfg.algo.policy.actor_class_name == "unilab.algos.torch.rsl_rl_ppo:LinvelEstimatorActor"
     assert cfg.algo.policy.init_noise_std == pytest.approx(0.35)
+    assert cfg.algo.policy.linvel_estimator.target_obs_group == "critic"
+    assert cfg.algo.policy.linvel_estimator.target_start == 0
+    assert cfg.algo.policy.linvel_estimator.target_dim == 3
+    assert cfg.algo.algorithm.class_name == "unilab.algos.torch.rsl_rl_ppo:LinvelEstimatorPPO"
     assert cfg.algo.algorithm.entropy_coef == pytest.approx(0.002)
+    assert cfg.algo.algorithm.linvel_estimator.learning_rate == pytest.approx(1.0e-3)
+    assert cfg.algo.algorithm.linvel_estimator.loss_coef == pytest.approx(1.0)
     assert cfg.reward.scales.action_rate == pytest.approx(-0.02)
     assert cfg.reward.scales.termination == pytest.approx(-5.0)
     assert cfg.reward.scales.front_leg_motion == pytest.approx(-0.1)

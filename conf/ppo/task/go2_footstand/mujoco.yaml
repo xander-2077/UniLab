@@ -5,6 +5,7 @@ training:
 env:
   sim_dt: 0.004
   obs_history_len: 15
+  estimate_linvel: true
   obs_latency_steps: 0
   randomize_obs_latency: true
   obs_latency_steps_range: [0, 2]
@@ -35,9 +36,23 @@ algo:
     critic:
       - critic
   policy:
+    actor_class_name: unilab.algos.torch.rsl_rl_ppo:LinvelEstimatorActor
     init_noise_std: 0.35
+    linvel_estimator:
+      hidden_dims: [128, 64]
+      activation: elu
+      target_obs_group: critic
+      target_start: 0
+      target_dim: 3
+      detach_in_policy: true
   algorithm:
+    class_name: unilab.algos.torch.rsl_rl_ppo:LinvelEstimatorPPO
     entropy_coef: 0.002
+    linvel_estimator:
+      enabled: true
+      learning_rate: 1.0e-3
+      loss_coef: 1.0
+      max_grad_norm: 1.0
 reward:
   scales:
     height: 2.0
