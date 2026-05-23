@@ -2,6 +2,49 @@
 training:
   task_name: Go2FootStand
   sim_backend: mujoco
+  no_play: true
+  play_only: false
+  play_env_num: 16
+  play_steps: 200
+  play_render_mode: auto
+  render_spacing: 1.0
+
+distill:
+  algo_log_name: rsl_rl_distill
+  task_name: Go2FootStand
+  load_run: logs/rsl_rl_distill/Go2FootStand/2026-05-22_06-14-41_mujoco
+  checkpoint: 4999
+  strict: true
+  log_root: null
+
+teacher:
+  algo_log_name: rsl_rl_ppo
+  task_name: Go2FootStand
+  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-21_08-12-04_mujoco
+  checkpoint: 14997
+  strict: true
+  log_root: null
+
+teacher_model:
+  class_name: rsl_rl.models.MLPModel
+  hidden_dims: [512, 256, 128]
+  activation: elu
+  obs_normalization: true
+  distribution_cfg:
+    class_name: rsl_rl.modules.distribution.GaussianDistribution
+    init_std: 0.35
+    std_type: scalar
+
+distillation:
+  teacher_obs_group: obs
+  student_frame_dim: 45
+  student_drop_start: 0
+  student_drop_dim: 3
+
+reward_source:
+  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-21_08-12-04_mujoco
+  strict: true
+
 env:
   sim_dt: 0.004
   obs_history_len: 15
@@ -9,13 +52,30 @@ env:
   obs_latency_steps: 0
   randomize_obs_latency: true
   obs_latency_steps_range: [0, 2]
-  energy_termination_threshold: 400.0
+  energy_termination_threshold: 200.0
+  post_stand_motion_penalty:
+    enabled: true
+    active_step_range: [0, -1]
+    height_fraction: 0.8
+    orientation_threshold: 0.5
+    displacement_deadband: 0.03
+    velocity_deadband: 0.05
+    velocity_weight: 0.5
+  rough_terrain:
+    enabled: false
+    generator:
+      difficulty_range: [0.0, 0.25]
+      num_rows: 3
+      num_cols: 3
+  terrain_curriculum:
+    enabled: false
   control_config:
     action_scale: 0.25
     simulate_action_latency: true
   domain_rand:
-    randomize_floor_friction: true
-    floor_friction_range: [0.4, 1.0]
+    randomize_floor_friction: false
+    floor_friction_range: [0.2, 1.5]
+    floor_friction_active_step_range: [0, -1]
     randomize_link_mass: true
     link_mass_scale_range: [0.9, 1.1]
     torso_added_mass_range: [-1.0, 1.0]
@@ -25,6 +85,64 @@ env:
     dof_armature_scale_range: [1.0, 1.05]
     randomize_reset_joint_qpos: true
     reset_joint_qpos_range: [-0.05, 0.05]
+algo:
+  algo: rsl_rl_student_finetune
+  algo_log_name: rsl_rl_student_finetune
+  seed: 1
+  num_envs: 4096
+  num_steps_per_env: 24
+  max_iterations: 5000
+  save_interval: 100
+  empirical_normalization: true
+  runner_class_name: OnPolicyRunner
+  obs_groups:
+    actor:
+      - actor
+    critic:
+      - critic
+  experiment_name: student_finetune
+  run_name: ""
+  resume: false
+  load_run: "-1"
+  checkpoint: -1
+  resume_path: null
+  policy:
+    actor_class_name: rsl_rl.models.MLPModel
+    critic_class_name: rsl_rl.models.MLPModel
+    init_noise_std: 0.35
+    actor_hidden_dims: [512, 256, 128]
+    critic_hidden_dims: [512, 256, 128]
+    activation: elu
+  algorithm:
+    class_name: unilab.algos.torch.rsl_rl_ppo:TeacherRegularizedPPO
+    value_loss_coef: 1.0
+    use_clipped_value_loss: true
+    clip_param: 0.2
+    entropy_coef: 0.001
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    learning_rate: 3.0e-4
+    schedule: adaptive
+    gamma: 0.99
+    lam: 0.95
+    desired_kl: 0.01
+    target_kl_stop: null
+    max_grad_norm: 1.0
+    adaptive_kl_beta: 0.9
+    adaptive_lr_growth: 1.1
+    adaptive_lr_decay: 1.2
+    adaptive_lr_update_interval: 5
+    metrics_interval: 8
+    finite_check_interval: 8
+    enable_compile: false
+    warmup_strict_iters: 10
+    warmup_metrics_interval: 2
+    warmup_finite_check_interval: 2
+    disable_finite_checks: true
+    teacher_regularization:
+      enabled: true
+      action_loss_coef: 0.05
+      kl_loss_coef: 0.01
 reward:
   scales:
     height: 2.0
@@ -41,6 +159,7 @@ reward:
     front_leg_motion: -0.1
     upright_stability: -0.4
     stay_still: -0.2
+    post_stand_motion: -1.0
     energy: -0.005
     dof_acc: -5.0e-7
   tracking_sigma: 0.25

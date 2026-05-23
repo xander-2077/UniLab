@@ -51,6 +51,8 @@ def normalize_ppo_train_cfg(train_cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(policy_cfg, dict):
         return normalized
 
+    actor_class_name = policy_cfg.get("actor_class_name", "rsl_rl.models.MLPModel")
+    critic_class_name = policy_cfg.get("critic_class_name", "rsl_rl.models.MLPModel")
     actor_hidden_dims = policy_cfg.get("actor_hidden_dims", [512, 256, 128])
     critic_hidden_dims = policy_cfg.get("critic_hidden_dims", actor_hidden_dims)
     activation = policy_cfg.get("activation", "elu")
@@ -58,7 +60,7 @@ def normalize_ppo_train_cfg(train_cfg: dict[str, Any]) -> dict[str, Any]:
     obs_normalization = bool(normalized.get("empirical_normalization", False))
 
     normalized["actor"] = {
-        "class_name": "rsl_rl.models.MLPModel",
+        "class_name": actor_class_name,
         "hidden_dims": actor_hidden_dims,
         "activation": activation,
         "obs_normalization": obs_normalization,
@@ -68,8 +70,11 @@ def normalize_ppo_train_cfg(train_cfg: dict[str, Any]) -> dict[str, Any]:
             "std_type": "scalar",
         },
     }
+    if "linvel_estimator" in policy_cfg:
+        normalized["actor"]["linvel_estimator"] = deepcopy(policy_cfg["linvel_estimator"])
+
     normalized["critic"] = {
-        "class_name": "rsl_rl.models.MLPModel",
+        "class_name": critic_class_name,
         "hidden_dims": critic_hidden_dims,
         "activation": activation,
         "obs_normalization": obs_normalization,
