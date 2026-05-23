@@ -17,9 +17,11 @@ from unilab.envs.locomotion.go2.footstand import (
     Go2FootStandCfg,
     Go2FootStandDomainRandConfig,
     Go2FootStandDomainRandomizationProvider,
+    Go2FootStandRoughTerrainCfg,
     Go2FootStandTask,
 )
 from unilab.envs.locomotion.go2.handstand import RewardConfig
+from unilab.terrains.terrain_generator import TerrainGenerator
 
 
 def test_go2_footstand_registers_mujoco_only() -> None:
@@ -172,6 +174,19 @@ def test_go2_footstand_rough_terrain_switch_materializes_hfield_scene_cfg() -> N
     assert cfg.scene.terrain.geom_name == "floor"
     assert cfg.scene.terrain.generator is cfg.rough_terrain.generator
     assert cfg.scene.terrain.generator.difficulty_range == (0.0, 0.2)
+
+
+def test_go2_footstand_rough_terrain_is_light_noise_only() -> None:
+    cfg = Go2FootStandRoughTerrainCfg()
+
+    assert list(cfg.sub_terrains) == ["random_rough"]
+    random_cfg = cfg.sub_terrains["random_rough"]
+    assert random_cfg.noise_range == pytest.approx((-0.015, 0.015))
+    assert random_cfg.noise_step == pytest.approx(0.005)
+
+    terrain = TerrainGenerator(cfg).generate()
+
+    assert terrain.z_max - terrain.z_min <= 0.03 + 1e-9
 
 
 def test_go2_footstand_front_leg_target_lifts_feet_body_forward() -> None:
@@ -719,11 +734,10 @@ def test_go2_footstand_upright_stability_is_standing_gated() -> None:
     np.testing.assert_allclose(cost, np.array([6.0, 0.0], dtype=np.float32))
 
 
-def test_go2_footstand_post_stand_motion_penalty_tracks_anchor_after_standing() -> None:
+def test_go2_footstand_post_stand_motion_penalty_uses_horizontal_speed_only() -> None:
     env = object.__new__(Go2FootStandTask)
     cfg = Go2FootStandCfg()
     cfg.post_stand_motion_penalty.enabled = True
-    cfg.post_stand_motion_penalty.displacement_deadband = 0.03
     cfg.post_stand_motion_penalty.velocity_deadband = 0.05
     cfg.post_stand_motion_penalty.velocity_weight = 0.5
     env._cfg = cfg
@@ -733,21 +747,9 @@ def test_go2_footstand_post_stand_motion_penalty_tracks_anchor_after_standing() 
     env.step_counter = 0
     env.torso_height = np.array([0.53, 0.53, 0.2], dtype=np.float32)
     env._orientation_score = lambda: np.array([1.0, 1.0, 1.0], dtype=np.float32)  # type: ignore[method-assign]
-    env._standing_anchor_xy = np.zeros((3, 2), dtype=np.float32)
-    env._has_standing_anchor = np.zeros((3,), dtype=bool)
+    env._backend.base_lin_vel[:, 0] = np.array([0.15, 0.02, 0.15], dtype=np.float32)
 
-    first_cost = env._cost_post_stand_motion(
-        RewardContext(
-            info={},
-            linvel=np.zeros((3, 3), dtype=np.float32),
-            gyro=np.zeros((3, 3), dtype=np.float32),
-            dof_pos=np.zeros((3, 12), dtype=np.float32),
-        )
-    )
-    env._backend.base_pos[:, 0] = np.array([0.13, 0.02, 0.50], dtype=np.float32)
-    env._backend.base_lin_vel[:, 0] = np.array([0.15, 0.15, 0.15], dtype=np.float32)
-
-    second_cost = env._cost_post_stand_motion(
+    cost = env._cost_post_stand_motion(
         RewardContext(
             info={},
             linvel=np.zeros((3, 3), dtype=np.float32),
@@ -756,10 +758,9 @@ def test_go2_footstand_post_stand_motion_penalty_tracks_anchor_after_standing() 
         )
     )
 
-    np.testing.assert_allclose(first_cost, np.zeros((3,), dtype=np.float32))
     np.testing.assert_allclose(
-        second_cost,
-        np.array([(0.13 - 0.03) ** 2 + 0.5 * (0.15 - 0.05) ** 2, 0.005, 0.0]),
+        cost,
+        np.array([0.5 * (0.15 - 0.05) ** 2, 0.0, 0.0], dtype=np.float32),
         rtol=1e-6,
     )
 
@@ -776,8 +777,7 @@ def test_go2_footstand_post_stand_motion_penalty_respects_step_range() -> None:
     env._z_des = 0.53
     env.torso_height = np.ones((3,), dtype=np.float32)
     env._orientation_score = lambda: np.ones((3,), dtype=np.float32)  # type: ignore[method-assign]
-    env._standing_anchor_xy = np.zeros((3, 2), dtype=np.float32)
-    env._has_standing_anchor = np.zeros((3,), dtype=bool)
+    env._backend.base_lin_vel[:, 0] = 1.0
 
     cost = env._cost_post_stand_motion(
         RewardContext(

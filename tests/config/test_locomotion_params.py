@@ -478,9 +478,9 @@ def test_ppo_go2_footstand_uses_sim2real_smoothing_terms():
     assert cfg.env.obs_latency_steps_range == [0, 2]
     assert cfg.env.post_stand_motion_penalty.enabled is True
     assert cfg.env.post_stand_motion_penalty.active_step_range == [0, -1]
-    assert cfg.env.post_stand_motion_penalty.displacement_deadband == pytest.approx(0.03)
+    assert cfg.env.post_stand_motion_penalty.velocity_deadband == pytest.approx(0.05)
     assert cfg.env.rough_terrain.enabled is False
-    assert cfg.env.rough_terrain.generator.difficulty_range == [0.0, 0.25]
+    assert cfg.env.rough_terrain.generator.difficulty_range == [0.0, 0.0]
     assert cfg.env.terrain_curriculum.enabled is False
     assert cfg.algo.policy.actor_class_name == "unilab.algos.torch.rsl_rl_ppo:LinvelEstimatorActor"
     assert cfg.algo.policy.init_noise_std == pytest.approx(0.35)

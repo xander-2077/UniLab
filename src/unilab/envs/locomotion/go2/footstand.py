@@ -26,9 +26,7 @@ from unilab.envs.locomotion.go2.handstand import (
 from unilab.terrains import (
     SubTerrainCfg,
     TerrainGeneratorCfg,
-    flat,
     random_rough,
-    wave_terrain,
 )
 
 _GO2_DOF_TO_CTRL = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8], dtype=np.int32)
@@ -70,7 +68,6 @@ class FootstandPostStandMotionPenaltyConfig:
     active_step_range: list[int] = field(default_factory=lambda: [0, -1])
     height_fraction: float = _FOOTSTAND_STAND_HEIGHT_FRACTION
     orientation_threshold: float = _FOOTSTAND_STAND_ORIENTATION_THRESHOLD
-    displacement_deadband: float = 0.03
     velocity_deadband: float = 0.05
     velocity_weight: float = 0.5
 
@@ -84,21 +81,14 @@ class Go2FootStandRoughTerrainCfg(TerrainGeneratorCfg):
     num_cols: int = 3
     border_width: float = 1.0
     horizontal_scale: float = 0.1
-    difficulty_range: tuple[float, float] = (0.0, 0.25)
+    difficulty_range: tuple[float, float] = (0.0, 0.0)
     add_lights: bool = True
     sub_terrains: dict[str, SubTerrainCfg] = field(
         default_factory=lambda: {
-            "flat": flat(proportion=0.2),
             "random_rough": random_rough(
-                proportion=0.5,
-                noise_range=(0.005, 0.035),
+                proportion=1.0,
+                noise_range=(-0.015, 0.015),
                 noise_step=0.005,
-                border_width=0.2,
-            ),
-            "wave_terrain": wave_terrain(
-                proportion=0.3,
-                amplitude_range=(0.0, 0.04),
-                num_waves=3,
                 border_width=0.2,
             ),
         }
@@ -279,8 +269,6 @@ class Go2FootStandDomainRandomizationProvider(Go2HandStandDomainRandomizationPro
         env.torso_height[env_ids] = height[:, 0]
         env._last_dof_vel_for_acc[env_ids, :] = dof_vel
         env._last_terminated[env_ids] = False
-        env._standing_anchor_xy[env_ids] = 0.0
-        env._has_standing_anchor[env_ids] = False
         env._motor_targets[env_ids] = env._dof_to_ctrl_order(dof_pos)
         target_dof = env._ctrl_to_dof_order(env._motor_targets[env_ids])
         info_updates["torques"] = np.asarray(
@@ -320,8 +308,6 @@ class Go2FootStandTask(Go2HandStandTask):
         self._last_terminated = np.zeros((num_envs,), dtype=bool)
         self._last_termination_breakdown: dict[str, np.ndarray] = {}
         self._last_termination_energy = np.zeros((num_envs,), dtype=get_global_dtype())
-        self._standing_anchor_xy = np.zeros((num_envs, 2), dtype=get_global_dtype())
-        self._has_standing_anchor = np.zeros((num_envs,), dtype=bool)
         self._motor_targets = np.zeros((num_envs, self._num_action), dtype=get_global_dtype())
         self._obs_history = np.zeros(
             (num_envs, self._obs_history_len, self._actor_frame_obs_dim),
@@ -939,18 +925,10 @@ class Go2FootStandTask(Go2HandStandTask):
             return np.zeros((self._num_envs,), dtype=get_global_dtype())
 
         standing = self._standing_mask().astype(bool)
-        base_pos = np.asarray(self._backend.get_base_pos(), dtype=get_global_dtype())
-        new_anchor = standing & ~self._has_standing_anchor
-        if np.any(new_anchor):
-            self._standing_anchor_xy[new_anchor] = base_pos[new_anchor, :2]
-            self._has_standing_anchor[new_anchor] = True
-
-        displacement = np.linalg.norm(base_pos[:, :2] - self._standing_anchor_xy, axis=1)
-        displacement_error = np.clip(displacement - float(cfg.displacement_deadband), 0.0, None)
         world_linvel = np.asarray(self._backend.get_base_lin_vel(), dtype=get_global_dtype())
         speed = np.linalg.norm(world_linvel[:, :2], axis=1)
         speed_error = np.clip(speed - float(cfg.velocity_deadband), 0.0, None)
-        cost = np.square(displacement_error) + float(cfg.velocity_weight) * np.square(speed_error)
+        cost = float(cfg.velocity_weight) * np.square(speed_error)
         return np.asarray(cost * standing, dtype=get_global_dtype())
 
     def _cost_torques(self, ctx: RewardContext) -> np.ndarray:
