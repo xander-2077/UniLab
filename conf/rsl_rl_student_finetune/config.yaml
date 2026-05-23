@@ -61,42 +61,6 @@ algo:
       action_loss_coef: 0.05
       kl_loss_coef: 0.01
 
-distill:
-  algo_log_name: rsl_rl_distill
-  task_name: Go2FootStand
-  load_run: logs/rsl_rl_distill/Go2FootStand/2026-05-22_06-14-41_mujoco
-  checkpoint: 4999
-  strict: true
-  log_root: null
-
-teacher:
-  algo_log_name: rsl_rl_ppo
-  task_name: Go2FootStand
-  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-21_08-12-04_mujoco
-  checkpoint: 14997
-  strict: true
-  log_root: null
-
-teacher_model:
-  class_name: rsl_rl.models.MLPModel
-  hidden_dims: [512, 256, 128]
-  activation: elu
-  obs_normalization: true
-  distribution_cfg:
-    class_name: rsl_rl.modules.distribution.GaussianDistribution
-    init_std: 0.35
-    std_type: scalar
-
-distillation:
-  teacher_obs_group: obs
-  student_frame_dim: 45
-  student_drop_start: 0
-  student_drop_dim: 3
-
-reward_source:
-  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-21_08-12-04_mujoco
-  strict: true
-
 training:
   task_name: Go2FootStand
   device: null

@@ -123,8 +123,14 @@ def _apply_reward_source(cfg: DictConfig) -> Path | None:
             raise KeyError(f"run_config has no config.reward section: {run_config_path}")
         return None
 
-    cfg.reward = OmegaConf.create(reward_cfg)
-    print(f"Loaded reward config from {run_config_path}")
+    source_reward = OmegaConf.create(reward_cfg)
+    local_reward = OmegaConf.select(cfg, "reward", default=None)
+    cfg.reward = (
+        OmegaConf.merge(source_reward, local_reward)
+        if local_reward is not None
+        else source_reward
+    )
+    print(f"Loaded reward config from {run_config_path} and applied local reward overrides")
     return run_config_path
 
 
