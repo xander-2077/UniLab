@@ -1,0 +1,47 @@
+# @package _global_
+training:
+  task_name: Go2FootStand
+  sim_backend: mujoco
+env:
+  sim_dt: 0.004
+  obs_history_len: 15
+  estimate_linvel: false
+  obs_latency_steps: 0
+  randomize_obs_latency: true
+  obs_latency_steps_range: [0, 2]
+  energy_termination_threshold: 400.0
+  control_config:
+    action_scale: 0.25
+    simulate_action_latency: true
+  domain_rand:
+    randomize_floor_friction: true
+    floor_friction_range: [0.4, 1.0]
+    randomize_link_mass: true
+    link_mass_scale_range: [0.9, 1.1]
+    torso_added_mass_range: [-1.0, 1.0]
+    randomize_torso_com: true
+    torso_com_offset_range: [-0.05, 0.05]
+    randomize_dof_armature: true
+    dof_armature_scale_range: [1.0, 1.05]
+    randomize_reset_joint_qpos: true
+    reset_joint_qpos_range: [-0.05, 0.05]
+reward:
+  scales:
+    height: 2.0
+    orientation: 2.0
+    contact: -1.0
+    action_rate: -0.02
+    termination: -5.0
+    dof_pos_limits: -0.5
+    torques: 0.0
+    pose: -0.1
+    penalty_contact: -0.2
+    tar: 0.8
+    rear_feet_contact: 0.5
+    front_leg_motion: -0.1
+    upright_stability: -0.4
+    stay_still: -0.2
+    energy: -0.005
+    dof_acc: -5.0e-7
+  tracking_sigma: 0.25
+  base_height_target: 0.3
