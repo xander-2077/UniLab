@@ -12,6 +12,7 @@ from unilab.dr import ResetRandomizationPayload
 from unilab.envs.locomotion.common.rewards import RewardContext
 from unilab.envs.locomotion.go2.footstand import (
     FootstandControlConfig,
+    FootstandPostStandMotionPenaltyConfig,
     FootstandSensor,
     Go2FootStandCfg,
     Go2FootStandDomainRandConfig,
@@ -46,6 +47,18 @@ class _BaseMotionBackend:
         return np.array([[0.0, 0.0, 2.0], [0.0, 2.0, 0.0]], dtype=np.float32)
 
 
+class _MutableBaseMotionBackend:
+    def __init__(self) -> None:
+        self.base_pos = np.zeros((3, 3), dtype=np.float32)
+        self.base_lin_vel = np.zeros((3, 3), dtype=np.float32)
+
+    def get_base_pos(self) -> np.ndarray:
+        return self.base_pos
+
+    def get_base_lin_vel(self) -> np.ndarray:
+        return self.base_lin_vel
+
+
 def test_go2_footstand_cfg_uses_rear_body_contact_termination() -> None:
     cfg = Go2FootStandCfg()
 
@@ -65,6 +78,12 @@ def test_go2_footstand_cfg_uses_rear_body_contact_termination() -> None:
     assert isinstance(cfg.domain_rand, Go2FootStandDomainRandConfig)
     assert cfg.domain_rand.randomize_kp is False
     assert cfg.domain_rand.randomize_floor_friction is True
+    assert cfg.domain_rand.floor_friction_range == [0.2, 1.5]
+    assert cfg.domain_rand.floor_friction_active_step_range == [0, -1]
+    assert isinstance(cfg.post_stand_motion_penalty, FootstandPostStandMotionPenaltyConfig)
+    assert cfg.post_stand_motion_penalty.enabled is False
+    assert cfg.rough_terrain.enabled is False
+    assert cfg.terrain_curriculum.enabled is False
     assert cfg.obs_history_len == 15
     assert cfg.obs_latency_steps == 0
     assert cfg.randomize_obs_latency is False
@@ -123,6 +142,7 @@ def test_go2_footstand_reward_functions_include_stability_terms() -> None:
     assert "rear_feet_contact" in env._reward_fns
     assert "front_leg_motion" in env._reward_fns
     assert "upright_stability" in env._reward_fns
+    assert "post_stand_motion" in env._reward_fns
 
 
 def test_go2_footstand_pose_targets_front_legs_and_supports_rear() -> None:
@@ -136,6 +156,22 @@ def test_go2_footstand_pose_targets_front_legs_and_supports_rear() -> None:
     np.testing.assert_allclose(
         env.target_angle, np.array([0.0, 0.82, -1.68, 0.0, 0.82, -1.6], dtype=np.float32)
     )
+
+
+def test_go2_footstand_rough_terrain_switch_materializes_hfield_scene_cfg() -> None:
+    cfg = Go2FootStandCfg()
+    cfg.rough_terrain.enabled = True
+    cfg.rough_terrain.generator.difficulty_range = (0.0, 0.2)
+
+    Go2FootStandTask._configure_rough_terrain(cfg)
+
+    assert cfg.scene.model_file.endswith("robots/go2/go2.xml")
+    assert cfg.scene.fragment_files == [cfg.rough_terrain.fragment_files[0]]
+    assert cfg.scene.terrain is not None
+    assert cfg.scene.terrain.hfield_name == "terrain_hfield"
+    assert cfg.scene.terrain.geom_name == "floor"
+    assert cfg.scene.terrain.generator is cfg.rough_terrain.generator
+    assert cfg.scene.terrain.generator.difficulty_range == (0.0, 0.2)
 
 
 def test_go2_footstand_front_leg_target_lifts_feet_body_forward() -> None:
@@ -422,6 +458,34 @@ def test_go2_footstand_energy_threshold_terminates() -> None:
     assert updated.terminated[0]
 
 
+def test_go2_footstand_logs_termination_breakdown() -> None:
+    env = object.__new__(Go2FootStandTask)
+    env._store_termination_diagnostics(
+        terminated=np.array([True, False, True], dtype=bool),
+        terminated_contact=np.array([True, False, False], dtype=bool),
+        terminated_z=np.array([False, False, False], dtype=bool),
+        terminated_energy=np.array([False, False, True], dtype=bool),
+        terminated_pose=np.array([False, False, True], dtype=bool),
+        terminated_low_height=np.array([False, True, True], dtype=bool),
+        terminated_bad_orientation=np.array([False, False, True], dtype=bool),
+        energy=np.array([10.0, 20.0, 30.0], dtype=np.float32),
+    )
+
+    log: dict[str, float] = {}
+    env._append_termination_log(log)
+
+    assert log["termination/any_rate"] == pytest.approx(2.0 / 3.0)
+    assert log["termination/any_count"] == pytest.approx(2.0)
+    assert log["termination/contact_rate"] == pytest.approx(1.0 / 3.0)
+    assert log["termination/upvector_z_count"] == pytest.approx(0.0)
+    assert log["termination/energy_count"] == pytest.approx(1.0)
+    assert log["termination/pose_rate"] == pytest.approx(1.0 / 3.0)
+    assert log["termination/low_height_rate"] == pytest.approx(2.0 / 3.0)
+    assert log["termination/bad_orientation_count"] == pytest.approx(1.0)
+    assert log["termination/energy_mean"] == pytest.approx(20.0)
+    assert log["termination/energy_max"] == pytest.approx(30.0)
+
+
 def test_go2_footstand_action_updates_incremental_motor_targets() -> None:
     env = object.__new__(Go2FootStandTask)
     env._cfg = Go2FootStandCfg()
@@ -511,8 +575,30 @@ def test_go2_footstand_playground_reset_randomization_payload_shapes() -> None:
     assert payload.body_mass is not None and payload.body_mass.shape == (2, 4)
     assert payload.body_ipos is not None and payload.body_ipos.shape == (2, 4, 3)
     assert payload.dof_armature is not None and payload.dof_armature.shape == (2, 18)
-    assert np.all((payload.geom_friction[:, 0, 0] >= 0.4) & (payload.geom_friction[:, 0, 0] <= 1.0))
+    assert np.all((payload.geom_friction[:, 0, 0] >= 0.2) & (payload.geom_friction[:, 0, 0] <= 1.5))
     np.testing.assert_allclose(payload.dof_armature[:, :6], 1.0)
+
+
+def test_go2_footstand_floor_friction_randomization_respects_active_step_range() -> None:
+    env = object.__new__(Go2FootStandTask)
+    env._cfg = Go2FootStandCfg()
+    env._cfg.domain_rand.floor_friction_active_step_range = [10, 20]
+    env._cfg.domain_rand.randomize_link_mass = False
+    env._cfg.domain_rand.torso_added_mass_range = None
+    env._cfg.domain_rand.randomize_torso_com = False
+    env._cfg.domain_rand.randomize_dof_armature = False
+    env.step_counter = 5
+    env._num_action = 12
+    env._floor_geom_id = 0
+    env._base_body_id = 1
+    env._base_geom_friction = np.ones((3, 3), dtype=np.float64)
+    env._base_body_mass = np.ones((4,), dtype=np.float64)
+    env._base_body_ipos = np.zeros((4, 3), dtype=np.float64)
+    env._base_dof_armature = np.ones((18,), dtype=np.float64)
+
+    payload = env._build_playground_reset_randomization(num_reset=2)
+
+    assert payload is None
 
 
 def test_go2_footstand_reset_randomization_merges_common_and_playground_terms() -> None:
@@ -618,6 +704,7 @@ def test_go2_footstand_upright_stability_is_standing_gated() -> None:
     env._backend = _BaseMotionBackend()
     env._z_des = 0.53
     env.torso_height = np.array([0.53, 0.53], dtype=np.float32)
+    env._cfg = Go2FootStandCfg()
     env._orientation_score = lambda: np.array([1.0, 0.4], dtype=np.float32)  # type: ignore[method-assign]
 
     cost = env._cost_upright_stability(
@@ -630,6 +717,78 @@ def test_go2_footstand_upright_stability_is_standing_gated() -> None:
     )
 
     np.testing.assert_allclose(cost, np.array([6.0, 0.0], dtype=np.float32))
+
+
+def test_go2_footstand_post_stand_motion_penalty_tracks_anchor_after_standing() -> None:
+    env = object.__new__(Go2FootStandTask)
+    cfg = Go2FootStandCfg()
+    cfg.post_stand_motion_penalty.enabled = True
+    cfg.post_stand_motion_penalty.displacement_deadband = 0.03
+    cfg.post_stand_motion_penalty.velocity_deadband = 0.05
+    cfg.post_stand_motion_penalty.velocity_weight = 0.5
+    env._cfg = cfg
+    env._backend = _MutableBaseMotionBackend()
+    env._num_envs = 3
+    env._z_des = 0.53
+    env.step_counter = 0
+    env.torso_height = np.array([0.53, 0.53, 0.2], dtype=np.float32)
+    env._orientation_score = lambda: np.array([1.0, 1.0, 1.0], dtype=np.float32)  # type: ignore[method-assign]
+    env._standing_anchor_xy = np.zeros((3, 2), dtype=np.float32)
+    env._has_standing_anchor = np.zeros((3,), dtype=bool)
+
+    first_cost = env._cost_post_stand_motion(
+        RewardContext(
+            info={},
+            linvel=np.zeros((3, 3), dtype=np.float32),
+            gyro=np.zeros((3, 3), dtype=np.float32),
+            dof_pos=np.zeros((3, 12), dtype=np.float32),
+        )
+    )
+    env._backend.base_pos[:, 0] = np.array([0.13, 0.02, 0.50], dtype=np.float32)
+    env._backend.base_lin_vel[:, 0] = np.array([0.15, 0.15, 0.15], dtype=np.float32)
+
+    second_cost = env._cost_post_stand_motion(
+        RewardContext(
+            info={},
+            linvel=np.zeros((3, 3), dtype=np.float32),
+            gyro=np.zeros((3, 3), dtype=np.float32),
+            dof_pos=np.zeros((3, 12), dtype=np.float32),
+        )
+    )
+
+    np.testing.assert_allclose(first_cost, np.zeros((3,), dtype=np.float32))
+    np.testing.assert_allclose(
+        second_cost,
+        np.array([(0.13 - 0.03) ** 2 + 0.5 * (0.15 - 0.05) ** 2, 0.005, 0.0]),
+        rtol=1e-6,
+    )
+
+
+def test_go2_footstand_post_stand_motion_penalty_respects_step_range() -> None:
+    env = object.__new__(Go2FootStandTask)
+    cfg = Go2FootStandCfg()
+    cfg.post_stand_motion_penalty.enabled = True
+    cfg.post_stand_motion_penalty.active_step_range = [10, 20]
+    env._cfg = cfg
+    env._backend = _MutableBaseMotionBackend()
+    env._num_envs = 3
+    env.step_counter = 5
+    env._z_des = 0.53
+    env.torso_height = np.ones((3,), dtype=np.float32)
+    env._orientation_score = lambda: np.ones((3,), dtype=np.float32)  # type: ignore[method-assign]
+    env._standing_anchor_xy = np.zeros((3, 2), dtype=np.float32)
+    env._has_standing_anchor = np.zeros((3,), dtype=bool)
+
+    cost = env._cost_post_stand_motion(
+        RewardContext(
+            info={},
+            linvel=np.zeros((3, 3), dtype=np.float32),
+            gyro=np.zeros((3, 3), dtype=np.float32),
+            dof_pos=np.zeros((3, 12), dtype=np.float32),
+        )
+    )
+
+    np.testing.assert_allclose(cost, np.zeros((3,), dtype=np.float32))
 
 
 def test_go2_footstand_post_grace_low_height_terminates() -> None:

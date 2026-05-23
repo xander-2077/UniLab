@@ -10,12 +10,34 @@ env:
   randomize_obs_latency: true
   obs_latency_steps_range: [0, 2]
   energy_termination_threshold: 400.0
+  # Feature 1: post-stand drift penalty. Keep this as the only enabled new feature
+  # when testing whether the real robot's backward drift improves.
+  post_stand_motion_penalty:
+    enabled: true
+    active_step_range: [0, -1]
+    height_fraction: 0.8
+    orientation_threshold: 0.5
+    displacement_deadband: 0.03
+    velocity_deadband: 0.05
+    velocity_weight: 0.5
+  # Feature 3: rough terrain is cold-path scene composition, so choose it before
+  # launching a run. Leave disabled when testing features 1 or 2.
+  rough_terrain:
+    enabled: false
+    generator:
+      difficulty_range: [0.0, 0.25]
+      num_rows: 3
+      num_cols: 3
+  terrain_curriculum:
+    enabled: false
   control_config:
     action_scale: 0.25
     simulate_action_latency: true
   domain_rand:
-    randomize_floor_friction: true
-    floor_friction_range: [0.4, 1.0]
+    # Feature 2: wide floor friction DR. Enable this separately from features 1/3.
+    randomize_floor_friction: false
+    floor_friction_range: [0.2, 1.5]
+    floor_friction_active_step_range: [0, -1]
     randomize_link_mass: true
     link_mass_scale_range: [0.9, 1.1]
     torso_added_mass_range: [-1.0, 1.0]
@@ -69,6 +91,7 @@ reward:
     front_leg_motion: -0.1
     upright_stability: -0.4
     stay_still: -0.2
+    post_stand_motion: -1.0
     energy: -0.005
     dof_acc: -5.0e-7
   tracking_sigma: 0.25
