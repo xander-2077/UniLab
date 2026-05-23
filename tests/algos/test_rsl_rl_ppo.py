@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import torch
+from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
-from unilab.algos.torch.rsl_rl_ppo import FinalObservationAwarePPO
+from unilab.algos.torch.rsl_rl_ppo import (
+    FinalObservationAwarePPO,
+    TeacherRegularizedPPO,
+)
 from unilab.training.rsl_rl import (
     HistoryObsDistillationWrapper,
     RslRlVecEnvWrapper,
@@ -172,3 +176,54 @@ def test_history_obs_distillation_wrapper_projects_student_obs_per_frame():
             dtype=torch.float32,
         ),
     )
+
+
+def _distribution_cfg() -> dict:
+    return {
+        "class_name": "rsl_rl.modules.distribution.GaussianDistribution",
+        "init_std": 0.2,
+        "std_type": "scalar",
+    }
+
+
+def test_teacher_regularized_ppo_computes_teacher_action_and_kl_losses():
+    torch.manual_seed(0)
+    obs = TensorDict(
+        {
+            "actor": torch.randn(4, 3),
+            "teacher": torch.randn(4, 5),
+        },
+        batch_size=[4],
+    )
+    actor = MLPModel(
+        obs,
+        {"actor": ["actor"], "teacher": ["teacher"]},
+        "actor",
+        output_dim=2,
+        hidden_dims=[8],
+        distribution_cfg=_distribution_cfg(),
+    )
+    teacher = MLPModel(
+        obs,
+        {"actor": ["actor"], "teacher": ["teacher"]},
+        "teacher",
+        output_dim=2,
+        hidden_dims=[8],
+        distribution_cfg=_distribution_cfg(),
+    )
+
+    algo = object.__new__(TeacherRegularizedPPO)
+    algo.actor = actor
+    algo.device = "cpu"
+    algo.teacher_regularization_enabled = True
+    algo.teacher_action_loss_coef = 1.0
+    algo.teacher_kl_loss_coef = 1.0
+    algo.set_teacher_policy(teacher)
+
+    actor(obs, stochastic_output=True)
+    loss, metrics = algo._teacher_regularization_loss(obs, actor.output_distribution_params)
+
+    assert loss.item() > 0.0
+    assert metrics["teacher_action"] > 0.0
+    assert metrics["teacher_kl"] > 0.0
+    assert all(not param.requires_grad for param in teacher.parameters())
