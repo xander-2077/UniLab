@@ -5,7 +5,14 @@ training:
 env:
   sim_dt: 0.004
   obs_history_len: 15
-  energy_termination_threshold: 400.0
+  energy_termination_threshold: 200.0
+  noise_config:
+    level: 1.0
+    scale_joint_angle: 0.01
+    scale_joint_vel: 1.5
+    scale_gyro: 0.2
+    scale_gravity: 0.05
+    scale_linvel: 0.1
   control_config:
     action_scale: 0.3
   domain_rand:
@@ -22,7 +29,7 @@ env:
     reset_joint_qpos_range: [-0.05, 0.05]
 algo:
   empirical_normalization: true
-  num_envs: 4096  # 1024
+  num_envs: 1024 # 4096  # 1024
   # max_iterations: 3000
   max_iterations: 10000
   obs_groups:
