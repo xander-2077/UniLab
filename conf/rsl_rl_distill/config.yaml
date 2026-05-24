@@ -1,0 +1,99 @@
+defaults:
+  - _self_
+  - task: go2_footstand/mujoco
+
+algo:
+  algo: rsl_rl_distill
+  algo_log_name: rsl_rl_distill
+  seed: 1
+  num_envs: 1024
+  num_steps_per_env: 24
+  max_iterations: 5000
+  save_interval: 100
+  empirical_normalization: true
+  load_run: "-1"
+  checkpoint: -1
+  obs_groups:
+    student:
+      - student
+    teacher:
+      - teacher
+  student:
+    class_name: rsl_rl.models.MLPModel
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    obs_normalization: true
+    distribution_cfg:
+      class_name: rsl_rl.modules.distribution.GaussianDistribution
+      init_std: 0.35
+      std_type: scalar
+  teacher:
+    class_name: rsl_rl.models.MLPModel
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    obs_normalization: true
+    distribution_cfg:
+      class_name: rsl_rl.modules.distribution.GaussianDistribution
+      init_std: 0.35
+      std_type: scalar
+  algorithm:
+    class_name: rsl_rl.algorithms:Distillation
+    num_learning_epochs: 1
+    gradient_length: 1
+    learning_rate: 1.0e-3
+    max_grad_norm: 1.0
+    loss_type: mse
+
+teacher:
+  algo_log_name: rsl_rl_ppo
+  task_name: Go2FootStand
+  load_run: 2026-05-23_23-34-11_mujoco
+  checkpoint: -1
+  strict: true
+  log_root: null
+
+distillation:
+  teacher_obs_group: obs
+  student_frame_dim: 45
+  student_drop_start: 0
+  student_drop_dim: 3
+
+training:
+  task_name: Go2FootStand
+  device: null
+  logger: tensorboard
+  wandb_project: unilab
+  wandb_entity: null
+  wandb_group: null
+  wandb_job_type: null
+  wandb_name: null
+  wandb_tags: []
+  wandb_notes: null
+  wandb_mode: null
+  sim_backend: mujoco
+  play_only: false
+  no_play: true
+  play_render_mode: auto
+  play_env_num: 16
+  render_spacing: 1.0
+  play_steps: 200
+  cam_distance: 6.0
+  cam_elevation: -20.0
+  cam_azimuth: 90.0
+  cam_lookat: null
+  cam_tracking: false
+  cam_tracking_env_idx: 0
+  cam_tracking_extra_envs: 2
+  log_root: null
+  num_timesteps: null
+  log_dir: null
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false
+  job_logging:
+    root:
+      handlers: [console]
