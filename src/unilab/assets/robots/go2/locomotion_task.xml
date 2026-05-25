@@ -7,7 +7,7 @@
 
     <contact name="base1_contact" geom1="floor" geom2="base1" data="found" num="1" reduce="mindist"/>
     <contact name="base2_contact" geom1="floor" geom2="base2" data="found" num="1" reduce="mindist"/>
-    <contact name="base3_contact" geom1="floor" geom2="base3" data="found" num="1" reduce="mindist"/>
+    <!-- <contact name="base3_contact" geom1="floor" geom2="base3" data="found" num="1" reduce="mindist"/> -->
 
     <contact name="FL_hip_contact" geom1="floor" geom2="FL_hip_geom" data="found" num="1" reduce="mindist"/>
     <contact name="FR_hip_contact" geom1="floor" geom2="FR_hip_geom" data="found" num="1" reduce="mindist"/>

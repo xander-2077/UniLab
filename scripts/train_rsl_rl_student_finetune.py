@@ -16,6 +16,8 @@ if str(SRC_DIR) not in sys.path:
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from rsl_rl.utils import resolve_callable
+
 from unilab.base.backend.mujoco.xml import materialize_scene_visual_override
 from unilab.training import (
     BackendAdapter,
@@ -121,6 +123,49 @@ def _load_critic_from_ppo(
         raise KeyError(f"Critic checkpoint has no critic_state_dict: {critic_checkpoint}")
     runner.alg.critic.load_state_dict(loaded["critic_state_dict"], strict=strict)
     print(f"Loaded critic from PPO checkpoint: {critic_checkpoint}")
+
+
+def _build_teacher_policy(wrapped_env: HistoryObsDistillationWrapper, cfg: DictConfig, device: str):
+    teacher_model_cfg_raw = OmegaConf.to_container(cfg.teacher_model, resolve=True)
+    if not isinstance(teacher_model_cfg_raw, dict):
+        raise TypeError("cfg.teacher_model must resolve to a dict")
+
+    teacher_model_cfg = cast(dict[str, Any], teacher_model_cfg_raw)
+    teacher_class = resolve_callable(str(teacher_model_cfg.pop("class_name")))
+    obs = wrapped_env.get_observations().to(device)
+    return teacher_class(
+        obs,
+        {"teacher": ["teacher"]},
+        "teacher",
+        wrapped_env.num_actions,
+        **teacher_model_cfg,
+    ).to(device)
+
+
+def _load_teacher_policy(
+    runner: Any,
+    wrapped_env: HistoryObsDistillationWrapper,
+    cfg: DictConfig,
+    teacher_checkpoint: Path,
+    device: str,
+) -> None:
+    teacher_policy = _build_teacher_policy(wrapped_env, cfg, device)
+    loaded = torch.load(teacher_checkpoint, map_location=device, weights_only=True)
+    if "actor_state_dict" in loaded:
+        state_dict = loaded["actor_state_dict"]
+    elif "teacher_state_dict" in loaded:
+        state_dict = loaded["teacher_state_dict"]
+    else:
+        raise KeyError(f"Teacher checkpoint has no actor/teacher state dict: {teacher_checkpoint}")
+
+    teacher_policy.load_state_dict(state_dict, strict=bool(cfg.teacher.strict))
+    if not hasattr(runner.alg, "set_teacher_policy"):
+        raise TypeError(
+            f"Configured PPO algorithm {type(runner.alg).__name__} does not support "
+            "set_teacher_policy()."
+        )
+    runner.alg.set_teacher_policy(teacher_policy)
+    print(f"Loaded frozen teacher policy: {teacher_checkpoint}")
 
 
 def _format_play_checkpoint_error(
@@ -303,9 +348,24 @@ def main(cfg: DictConfig) -> None:
             OnPolicyRunner(cast(Any, wrapped_env), train_cfg, log_dir=log_dir, device=device),
         )
 
+        teacher_checkpoint, teacher_run_dir = _resolve_aux_checkpoint(cfg, "teacher")
+        if teacher_checkpoint is None or not teacher_checkpoint.exists():
+            raise FileNotFoundError(
+                f"Could not resolve teacher checkpoint: resolved_checkpoint={teacher_checkpoint} "
+                f"resolved_run={teacher_run_dir}"
+            )
+
         resume_path: Path | None = None
         if cfg.algo.load_run != "-1":
-            resume_path, _ = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
+            resume_path, resume_run_dir = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
+            if resume_path is None or not resume_path.exists():
+                raise FileNotFoundError(
+                    "Could not resolve requested student fine-tune resume checkpoint: "
+                    f"algo.load_run={cfg.algo.load_run!r} "
+                    f"algo.checkpoint={cfg.algo.checkpoint!r} "
+                    f"resolved_checkpoint={resume_path} resolved_run={resume_run_dir}. "
+                    "Set algo.load_run=-1 to initialize from distill actor + critic instead."
+                )
 
         distill_checkpoint: Path | None = None
         critic_checkpoint: Path | None = None
@@ -339,6 +399,8 @@ def main(cfg: DictConfig) -> None:
                 device=device,
             )
 
+        _load_teacher_policy(runner, wrapped_env, cfg, teacher_checkpoint, device)
+
         train_start_wall = time.time()
         runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)
         runner.export_policy_to_onnx(path=log_dir)
@@ -368,6 +430,7 @@ def main(cfg: DictConfig) -> None:
             ),
             "distill_checkpoint": str(distill_checkpoint) if distill_checkpoint else None,
             "critic_checkpoint": str(critic_checkpoint) if critic_checkpoint else None,
+            "teacher_checkpoint": str(teacher_checkpoint),
             "training_wall_time_sec": time.time() - train_start_wall,
         }
         tracker.update_summary(train_summary)

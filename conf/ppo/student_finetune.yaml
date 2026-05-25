@@ -30,7 +30,7 @@ algo:
     activation: elu
     class_name: ActorCritic
   algorithm:
-    class_name: unilab.algos.torch.rsl_rl_ppo:FinalObservationAwarePPO
+    class_name: unilab.algos.torch.rsl_rl_ppo:TeacherRegularizedPPO
     value_loss_coef: 1.0
     use_clipped_value_loss: true
     clip_param: 0.2
@@ -55,6 +55,10 @@ algo:
     warmup_metrics_interval: 2
     warmup_finite_check_interval: 2
     disable_finite_checks: true
+    teacher_regularization:
+      enabled: true
+      action_loss_coef: 0.05
+      kl_loss_coef: 0.01
 
 distill:
   algo_log_name: rsl_rl_distill
@@ -67,10 +71,28 @@ distill:
 critic:
   algo_log_name: rsl_rl_ppo
   task_name: Go2FootStand
-  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-24_01-35-24_mujoco
+  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-23_23-34-11_mujoco
   checkpoint: -1
   strict: true
   log_root: null
+
+teacher:
+  algo_log_name: rsl_rl_ppo
+  task_name: Go2FootStand
+  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-23_23-34-11_mujoco
+  checkpoint: -1
+  strict: true
+  log_root: null
+
+teacher_model:
+  class_name: rsl_rl.models.MLPModel
+  hidden_dims: [512, 256, 128]
+  activation: elu
+  obs_normalization: true
+  distribution_cfg:
+    class_name: rsl_rl.modules.distribution.GaussianDistribution
+    init_std: 0.5
+    std_type: scalar
 
 distillation:
   teacher_obs_group: obs
