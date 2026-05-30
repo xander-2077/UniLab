@@ -44,6 +44,17 @@ class _BaseMotionBackend:
         return np.array([[0.0, 0.0, 2.0], [0.0, 2.0, 0.0]], dtype=np.float32)
 
 
+class _KneeHeightBackend:
+    def __init__(self, knee_height: np.ndarray) -> None:
+        self._knee_height = knee_height
+
+    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+        assert body_ids.shape == (4,)
+        out = np.zeros((*self._knee_height.shape, 3), dtype=np.float32)
+        out[:, :, 2] = self._knee_height
+        return out
+
+
 def test_go2_footstand_cfg_uses_rear_body_contact_termination() -> None:
     cfg = Go2FootStandCfg()
 
@@ -56,6 +67,7 @@ def test_go2_footstand_cfg_uses_rear_body_contact_termination() -> None:
     assert cfg.noise_config.level == pytest.approx(1.0)
     assert cfg.noise_config.scale_joint_angle == pytest.approx(0.01)
     assert cfg.noise_config.scale_joint_vel == pytest.approx(1.5)
+    assert cfg.add_body_sensors is True
     assert isinstance(cfg.control_config, FootstandControlConfig)
     assert cfg.control_config.action_scale == pytest.approx(0.3)
     assert cfg.control_config.clip_actions == pytest.approx(1.0)
@@ -114,8 +126,10 @@ def test_go2_footstand_reward_functions_include_stability_terms() -> None:
     assert "penalty_contact" in env._reward_fns
     assert "termination" in env._reward_fns
     assert "rear_feet_contact" in env._reward_fns
+    assert "rear_leg_symmetry" in env._reward_fns
     assert "front_leg_motion" in env._reward_fns
     assert "upright_stability" in env._reward_fns
+    assert "knee_clearance" in env._reward_fns
 
 
 def test_go2_footstand_pose_targets_front_legs_and_supports_rear() -> None:
@@ -426,6 +440,33 @@ def test_go2_footstand_rear_feet_contact_rewards_support_feet() -> None:
     np.testing.assert_allclose(reward, np.array([1.0, 0.5, 0.0], dtype=np.float32))
 
 
+def test_go2_footstand_rear_leg_symmetry_mirrors_hip_sign_only() -> None:
+    env = object.__new__(Go2FootStandTask)
+    env._standing_mask = lambda: np.array([0.0, 0.0, 1.0], dtype=np.float32)  # type: ignore[method-assign]
+    dof_pos = np.zeros((3, 12), dtype=np.float32)
+    dof_pos[0, 6:9] = np.array([0.2, 1.0, -1.5], dtype=np.float32)
+    dof_pos[0, 9:12] = np.array([-0.2, 1.0, -1.5], dtype=np.float32)
+    dof_pos[1, 6:9] = np.array([0.2, 1.0, -1.5], dtype=np.float32)
+    dof_pos[1, 9:12] = np.array([0.3, 1.0, -1.5], dtype=np.float32)
+    dof_pos[2, 6:9] = np.array([0.0, 1.2, -1.1], dtype=np.float32)
+    dof_pos[2, 9:12] = np.array([0.0, 0.9, -1.7], dtype=np.float32)
+
+    cost = env._cost_rear_leg_symmetry(
+        RewardContext(
+            info={},
+            linvel=np.zeros((3, 3), dtype=np.float32),
+            gyro=np.zeros((3, 3), dtype=np.float32),
+            dof_pos=dof_pos,
+        )
+    )
+
+    np.testing.assert_allclose(
+        cost,
+        np.array([0.0, 0.25 / 3.0, 0.0], dtype=np.float32),
+        rtol=1e-6,
+    )
+
+
 def test_go2_footstand_front_leg_motion_only_penalizes_standing_pose() -> None:
     env = object.__new__(Go2FootStandTask)
     env._z_des = 0.53
@@ -464,6 +505,38 @@ def test_go2_footstand_upright_stability_is_standing_gated() -> None:
     )
 
     np.testing.assert_allclose(cost, np.array([6.0, 0.0], dtype=np.float32))
+
+
+def test_go2_footstand_knee_clearance_penalizes_low_knees() -> None:
+    env = object.__new__(Go2FootStandTask)
+    env._reward_cfg = RewardConfig(
+        scales={},
+        tracking_sigma=0.25,
+        base_height_target=0.3,
+        knee_height_target=0.1,
+    )
+    env._knee_body_ids = np.array([1, 2, 3, 4], dtype=np.int32)
+    env._backend = _KneeHeightBackend(
+        np.array(
+            [
+                [0.1, 0.12, 0.2, 0.3],
+                [0.05, 0.05, 0.05, 0.05],
+                [0.0, 0.05, 0.1, 0.15],
+            ],
+            dtype=np.float32,
+        )
+    )
+
+    cost = env._cost_knee_clearance(
+        RewardContext(
+            info={},
+            linvel=np.zeros((3, 3), dtype=np.float32),
+            gyro=np.zeros((3, 3), dtype=np.float32),
+            dof_pos=np.zeros((3, 12), dtype=np.float32),
+        )
+    )
+
+    np.testing.assert_allclose(cost, np.array([0.0, 0.25, 0.3125], dtype=np.float32))
 
 
 def test_go2_footstand_post_grace_low_height_terminates() -> None:

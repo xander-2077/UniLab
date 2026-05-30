@@ -4,6 +4,7 @@ training:
   sim_backend: mujoco
 env:
   sim_dt: 0.004
+  add_body_sensors: true
   obs_history_len: 15
   energy_termination_threshold: 200.0
   noise_config:
@@ -40,10 +41,13 @@ reward:
     penalty_contact: -0.2
     tar: 0.8
     rear_feet_contact: 0.5
+    rear_leg_symmetry: -0.2
     front_leg_motion: -0.05
     upright_stability: -0.2
+    knee_clearance: -0.5
     stay_still: -0.1
     energy: -0.003
     dof_acc: -2.5e-7
   tracking_sigma: 0.25
   base_height_target: 0.3
+  knee_height_target: 0.08

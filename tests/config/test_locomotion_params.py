@@ -469,9 +469,13 @@ def test_ppo_go2_footstand_uses_sim2real_smoothing_terms():
     with initialize_config_dir(config_dir=str(CONF_DIR / "ppo"), version_base="1.3"):
         cfg = compose("config", overrides=["task=go2_footstand/mujoco"])
 
-    assert cfg.env.energy_termination_threshold == pytest.approx(400.0)
+    assert cfg.env.energy_termination_threshold == pytest.approx(200.0)
     assert cfg.reward.scales.energy == pytest.approx(-0.003)
     assert cfg.reward.scales.dof_acc == pytest.approx(-2.5e-7)
+    assert cfg.reward.scales.rear_leg_symmetry == pytest.approx(-0.2)
+    assert cfg.reward.scales.knee_clearance == pytest.approx(-0.5)
+    assert cfg.reward.knee_height_target == pytest.approx(0.08)
+    assert cfg.env.add_body_sensors is True
     assert cfg.env.domain_rand.randomize_floor_friction is True
     assert cfg.env.domain_rand.randomize_link_mass is True
     assert cfg.env.domain_rand.randomize_torso_com is True

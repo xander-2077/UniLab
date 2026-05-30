@@ -68,10 +68,25 @@ distill:
   strict: true
   log_root: null
 
+# critic:
+#   algo_log_name: rsl_rl_ppo
+#   task_name: Go2FootStand
+#   load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-23_23-34-11_mujoco
+#   checkpoint: -1
+#   strict: true
+#   log_root: null
+
+# teacher:
+#   algo_log_name: rsl_rl_ppo
+#   task_name: Go2FootStand
+#   load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-23_23-34-11_mujoco
+#   checkpoint: -1
+#   strict: true
+#   log_root: null
 critic:
   algo_log_name: rsl_rl_ppo
   task_name: Go2FootStand
-  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-23_23-34-11_mujoco
+  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-23_22-22-00_mujoco
   checkpoint: -1
   strict: true
   log_root: null
@@ -79,7 +94,7 @@ critic:
 teacher:
   algo_log_name: rsl_rl_ppo
   task_name: Go2FootStand
-  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-23_23-34-11_mujoco
+  load_run: logs/rsl_rl_ppo/Go2FootStand/2026-05-23_22-22-00_mujoco
   checkpoint: -1
   strict: true
   log_root: null

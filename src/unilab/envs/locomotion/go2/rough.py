@@ -134,7 +134,6 @@ class RoughJoystickSensor(JoystickSensor):
     undesired_contact = [
         "base1_contact",
         "base2_contact",
-        "base3_contact",
         "FL_hip_contact",
         "FR_hip_contact",
         "RL_hip_contact",

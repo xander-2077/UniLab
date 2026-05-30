@@ -40,6 +40,7 @@ class RewardConfig:
     tracking_sigma: float
     base_height_target: float
     target_foot_height: float = 0.1
+    knee_height_target: float = 0.08
 
 
 @dataclass
@@ -52,7 +53,6 @@ class JoystickSensor:
     ternamate_contact = [
         "base1_contact",
         "base2_contact",
-        "base3_contact",
         "FL_hip_contact",
         "FR_hip_contact",
         "FL_thigh_contact",
@@ -136,6 +136,7 @@ class Go2HandStandTask(Go2BaseEnv):
             cfg.sim_dt,
             base_name=cfg.asset.base_name,
             push_body_name=cfg.domain_rand.push_body_name,
+            add_body_sensors=bool(getattr(cfg, "add_body_sensors", False)),
             position_actuator_gains={"kp": cfg.control_config.Kp, "kd": cfg.control_config.Kd},
             motrix_max_iterations=cfg.motrix_max_iterations,
         )
